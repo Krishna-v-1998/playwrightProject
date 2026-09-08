@@ -1,0 +1,3128 @@
+Consolidated Implementation — Based on Actual Application Screenshots
+What the Screenshots Reveal
+
+From careful analysis of all images, the actual application differs significantly from our earlier assumptions:
+
+ACTUAL URL:
+  https://allianz-qa-subhubplus-uatx.unqork.io/app/metrix-ui/
+  #/display/6a3c26cf2ea7f188470de740?metrixSubmissionId=6a9e938009d461e0953...
+  ↑ Two parts: pathId in hash route + metrixSubmissionId as query param
+
+ACTUAL NAVIGATION (left sidebar):
+  NB-2026-00267
+  ├── SUBMISSION
+  │     └── General Information       → tabs: Insured Info | Policy Info | Broker Info
+  ├── RISK & PRICING
+  │     └── Underwriting File
+  │           ├── Location Management
+  │           ├── Exposures & Quotes  → Quote list table → Quote Options (same tab)
+  │           ├── CAT Modeling
+  │           ├── Reinsurance
+  │           └── Account Review
+  ├── ARC → Manage ARC Requests
+  ├── REFERRALS → Manage Referrals
+  └── TRANSACTIONS
+
+ACTUAL QUOTE FLOW (same tab, NOT new tab):
+  Exposures & Quotes → "+ Add New" → New Quote panel (right side)
+    → Fill: QUOTE ID, EFFECTIVE DATE, PRODUCT, SUB-SEGMENT → Create
+    → Opens "Quote Options" page in SAME TAB
+    → 4 steps: 01 Quote Details | 02 Forms | 03 Forms Preview | 04 Form Set Order
+    → Step 01: General Quote Info + BR-2 tab + Exposure fields + Supplemental + Deductibles
+    → Step 02: Form Sets (radio) + Mandatory Forms + Optional Forms + Form Fields (right panel)
+    → Step 03 "Forms Preview >": Opens PDF in NEW TAB
+
+ACTUAL EXCEL COLUMNS (from screenshot):
+  Product | Sub Segment | Formset | Form Number (UUID) | Form Name | Form ID |
+  Form Order | Category | States Applicable | Field | Type | Required | Mapping
+
+ACTUAL FIELD TYPES visible in screenshots:
+  Text, Date, Dropdown (Select), Grid [Columns:... Rows:...]
+SECTION 1 — Types & Data Contracts
+src/helpers/UrlHelper.ts
+
+What changed: extractMetrixSubmissionId now correctly extracts from ?metrixSubmissionId= query parameter inside the hash. Added extractDisplayId for the path ID. isSubmissionPage checks for metrixSubmissionId param.
+
+typescript
+/**
+ * UrlHelper
+ *
+ * Handles URL parsing for the hash-based routing application.
+ *
+ * ACTUAL URL formats observed in screenshots:
+ *   Login:      /#/auth/login
+ *   Dashboard:  /#/display/{pathId}                          (no metrixSubmissionId param)
+ *   Submission: /#/display/{pathId}?metrixSubmissionId={id}  (has metrixSubmissionId param)
+ *
+ * TWO IDs exist in submission URLs:
+ *   pathId           = segment after /display/ in hash path  (e.g. 6a3c26cf2ea7f188470de740)
+ *   metrixSubmissionId = query param value                   (e.g. 6a9e938009d461e0953...)
+ *
+ * The metrixSubmissionId is the primary business key.
+ * The pathId is required for URL reconstruction/navigation.
+ */
+export class UrlHelper {
+
+  /**
+   * Extracts the metrixSubmissionId query parameter from the URL hash.
+   *
+   * Input:  '.../#/display/6a3c26cf2ea7f188470de740?metrixSubmissionId=6a9e938009d461e0953'
+   * Output: '6a9e938009d461e0953'
+   */
+  static extractMetrixSubmissionId(url: string): string {
+    const hashPart  = url.split('#')[1] ?? '';
+    const queryPart = hashPart.split('?')[1] ?? '';
+    const params    = new URLSearchParams(queryPart);
+    return params.get('metrixSubmissionId')?.trim() ?? '';
+  }
+
+  /**
+   * Extracts the path-level display ID (segment after /display/ in the hash).
+   *
+   * Input:  '.../#/display/6a3c26cf2ea7f188470de740?metrixSubmissionId=...'
+   * Output: '6a3c26cf2ea7f188470de740'
+   *
+   * Required for reconstructing the full submission URL for navigation.
+   */
+  static extractDisplayId(url: string): string {
+    const hashPart = url.split('#')[1] ?? '';
+    const pathPart = hashPart.split('?')[0] ?? '';
+    const segments = pathPart.split('/').filter((s) => s.trim().length > 0);
+    // segments = ['display', '6a3c26cf2ea7f188470de740'] → last segment is the ID
+    return segments[segments.length - 1] ?? '';
+  }
+
+  /**
+   * Builds a full submission URL from its two components.
+   * Required because navigation needs both the path ID and metrixSubmissionId.
+   *
+   * Usage:
+   *   const url = UrlHelper.buildSubmissionUrl(baseUrl, stored.displayId, stored.metrixSubmissionId);
+   */
+  static buildSubmissionUrl(
+    baseUrl:             string,
+    displayId:           string,
+    metrixSubmissionId:  string,
+  ): string {
+    return `${baseUrl}/#/display/${displayId}?metrixSubmissionId=${metrixSubmissionId}`;
+  }
+
+  /**
+   * Returns true if the URL is the login page.
+   */
+  static isLoginPage(url: string): boolean {
+    return url.includes('#/auth/login');
+  }
+
+  /**
+   * Returns true if the URL is the dashboard.
+   * Dashboard: has /#/display/ in hash but NO metrixSubmissionId query param.
+   */
+  static isDashboard(url: string): boolean {
+    const hashPart  = url.split('#')[1] ?? '';
+    const queryPart = hashPart.split('?')[1] ?? '';
+    const params    = new URLSearchParams(queryPart);
+    return hashPart.includes('/display/') && !params.has('metrixSubmissionId');
+  }
+
+  /**
+   * Returns true if the URL is an opened submission page.
+   * Identified by presence of metrixSubmissionId query param in hash.
+   */
+  static isSubmissionPage(url: string): boolean {
+    const hashPart  = url.split('#')[1] ?? '';
+    const queryPart = hashPart.split('?')[1] ?? '';
+    const params    = new URLSearchParams(queryPart);
+    return params.has('metrixSubmissionId');
+  }
+}
+src/types/submission.types.ts
+
+What changed: Added displayId (path segment from URL) and submissionUrl (full URL for reliable navigation). quoteId is now the user-entered Quote ID like "QO-2".
+
+typescript
+import { Country }    from '../enums/country.enum';
+import { PolicyType } from '../enums/policy-type.enum';
+import { Product }    from '../enums/product.enum';
+import { SubLOB }     from '../enums/sublob.enum';
+
+export interface AddressData {
+  country:         Country;
+  streetAddress:   string;
+  streetAddress2?: string;
+  city:            string;
+  state:           string;
+  zip:             string;
+}
+
+export interface InsuredData extends AddressData {
+  namedInsured: string;
+}
+
+export interface BrokerData extends AddressData {
+  brokerCompany:  string;
+  brokerContact?: string;
+  email?:         string;
+  commission?:    number;
+  brokerNotes?:   string;
+  wins?:          string;
+}
+
+export interface SubmissionFormData {
+  policyType:          PolicyType;
+  subLOB:              SubLOB;
+  submissionNumber:    string;
+  sfdcSubmissionId:    string;
+  inceptionDate:       string;
+  expirationDate?:     string;
+  requestedDate?:      string;
+  winsNumber:          string;
+  products:            Product[];
+  insured:             InsuredData;
+  broker:              BrokerData;
+  primaryUnderwriter?: string;
+}
+
+/**
+ * StoredSubmission
+ *
+ * Persisted to storage-states/submissions.json after submission creation.
+ *
+ * UPDATED based on actual URL structure from screenshots:
+ *   URL = /#/display/{displayId}?metrixSubmissionId={metrixSubmissionId}
+ *
+ * Both IDs are stored for reliable navigation reconstruction.
+ * submissionUrl stores the full URL to avoid reconstruction issues.
+ *
+ * quoteId = the user-entered Quote ID (e.g. 'QO-2', 'QO-1')
+ *           NOT system-generated — entered by user in New Quote panel
+ *           Empty string until a quote is created.
+ */
+export interface StoredSubmission {
+  metrixSubmissionId:  string;  // from ?metrixSubmissionId= query param in hash
+  displayId:           string;  // path segment: /#/display/{displayId}
+  submissionUrl:       string;  // full URL stored for reliable navigation
+  quoteId:             string;  // user-entered quote ID (e.g. 'QO-2') — empty until created
+  submissionNumber:    string;  // e.g. '4061442121' (from Submission NO field)
+  namedInsured:        string;
+  createdAt:           number;
+  environment:         string;
+}
+src/coverage/types/coverage.types.ts
+
+What changed: Added grid field type (visible in Excel screenshot). Added formNumber (UUID), formOrder. Updated FormSetConfig to use formset matching actual Excel column name. Added GridConfig interface for grid fields.
+
+typescript
+// ── Field Types ───────────────────────────────────────────────────────────────
+// Types observed in actual Excel screenshot:
+//   Text, Grid [Columns:... Rows:...]
+// Types expected from form fields in screenshots:
+//   Text, Date, Dropdown (Select)
+
+export type FieldType =
+  | 'text'
+  | 'number'
+  | 'dropdown'
+  | 'checkbox'
+  | 'radio'
+  | 'date'
+  | 'textarea'
+  | 'grid';     // ← NEW: table-like field with columns and rows (seen in Excel)
+
+// ── Grid Config ───────────────────────────────────────────────────────────────
+
+/**
+ * Configuration for Grid field type.
+ * Parsed from Excel "Type" column values like:
+ *   "Grid [Columns: Loc. No(s), Bldg.No(s), %Deductible] [Rows 3]"
+ */
+export interface GridConfig {
+  columns:  string[];  // column names
+  rowCount: number;    // number of rows
+}
+
+// ── Field Config ──────────────────────────────────────────────────────────────
+
+/**
+ * Represents one row in the Excel file (one field in one form).
+ *
+ * Excel columns (from actual screenshot):
+ *   Product | Sub Segment | Formset | Form Number | Form Name | Form ID |
+ *   Form Order | Category | States Applicable | Field | Type | Required | Mapping
+ */
+export interface FormFieldConfig {
+  fieldLabel:       string;      // "Field" column
+  fieldSelector:    string;      // derived or from optional "Field Selector" column
+  type:             FieldType;   // "Type" column (parsed)
+  gridConfig?:      GridConfig;  // only for type='grid' — parsed from Type column
+  required:         boolean;     // "Required" column (Yes/No)
+  mapping:          string;      // "Mapping" column — key/description for value lookup
+  statesApplicable: string;      // "States Applicable" column
+  editable:         boolean;     // false = pre-populated (verify) | true = user-fills
+}
+
+// ── Form Config ───────────────────────────────────────────────────────────────
+
+/**
+ * Represents one form within a Form Set.
+ * Corresponds to multiple Excel rows sharing the same Form ID.
+ */
+export interface FormConfig {
+  formId:     string;                   // "Form ID" (e.g. 'IM 8012 01 10')
+  formNumber: string;                   // "Form Number" UUID (internal ID)
+  formName:   string;                   // "Form Name" (e.g. 'DEDUCTIBLE CLAUSE ENDORSEMENT')
+  formOrder:  number;                   // "Form Order" — display sequence
+  category:   'Mandatory' | 'Optional'; // "Category" column
+  fields:     FormFieldConfig[];
+}
+
+// ── Form Set Config ───────────────────────────────────────────────────────────
+
+/**
+ * Represents one Form Set (radio button in Forms section).
+ *
+ * Maps to Excel "Formset" column (e.g. 'Builder's Risk, Construction Block').
+ * The formSetName is the display label on the radio button (e.g. 'Builder's Risk').
+ */
+export interface FormSetConfig {
+  formSetName:   string;  // display name for radio button (e.g. 'Builder's Risk')
+  formset:       string;  // full formset value from Excel (e.g. 'Builder's Risk, Construction Block')
+  product:       string;
+  subSegment:    string;
+  forms:         FormConfig[];
+}
+
+// ── Runtime Value Map ─────────────────────────────────────────────────────────
+
+/**
+ * Maps field mapping key → actual value at runtime.
+ *
+ * Key   = "Mapping" column value (e.g. 'Under Hurricane Deductible')
+ * Value = actual value from submission/quote/application data
+ *
+ * NOTE: Excel contains structure only.
+ * Values are provided at runtime in the test's submissionData map.
+ */
+export type SubmissionDataMap = Record<string, string>;
+
+// ── Verification Results ──────────────────────────────────────────────────────
+
+export interface FieldVerificationResult {
+  fieldLabel: string;
+  selector:   string;
+  mapping:    string;
+  expected:   string;
+  actual:     string;
+  passed:     boolean;
+}
+
+export interface FormVerificationResult {
+  formName: string;
+  formId:   string;
+  passed:   boolean;
+  fields:   FieldVerificationResult[];
+}
+src/coverage/loader/ExcelJSConfigLoader.ts
+
+What changed: Column names updated to match actual Excel screenshot. Added parsing for Form Number, Form Order, Formset columns. Added grid type parsing (extracts columns and row count from complex type strings). Added formSetName derivation from Formset column.
+
+typescript
+import { Workbook }      from 'exceljs';
+import type {
+  Cell,
+  Row,
+  CellRichTextValue,
+  CellFormulaValue,
+  CellHyperlinkValue,
+} from 'exceljs';
+import {
+  FormSetConfig,
+  FormConfig,
+  FormFieldConfig,
+  FieldType,
+  GridConfig,
+} from '../types/coverage.types';
+import { Logger } from '../../utils/LoggerUtils';
+
+/**
+ * Column header names — must match your Excel file exactly (case-sensitive).
+ *
+ * FROM ACTUAL SCREENSHOT:
+ *   Column A: Product
+ *   Column B: Sub Segment
+ *   Column C: Formset
+ *   Column D: Form Number  (UUID like '3C0801C89D74121688825773700SFA-C72')
+ *   Column E: Form Name    (readable: 'DEDUCTIBLE CLAUSE ENDORSEMENT')
+ *   Column F: Form ID      (code: 'IM 8012 01 10')
+ *   Column G: Form Order
+ *   Column H: Category     (Optional / Mandatory)
+ *   Column I: States Applicable
+ *   Column J: Field
+ *   Column K: Type         (Text, Grid [Columns:...][Rows...])
+ *   Column L: Required     (Yes / No)
+ *   Column M: Mapping
+ *
+ * Typed as Record<string, string> — NOT as const.
+ * 'as const' causes TypeScript literal-type indexing errors in strict mode.
+ */
+const COL: Record<string, string> = {
+  PRODUCT:           'Product',
+  SUB_SEGMENT:       'Sub Segment',
+  FORMSET:           'Formset',
+  FORM_NUMBER:       'Form Number',
+  FORM_NAME:         'Form Name',
+  FORM_ID:           'Form ID',
+  FORM_ORDER:        'Form Order',
+  CATEGORY:          'Category',
+  STATES_APPLICABLE: 'States Applicable',
+  FIELD:             'Field',
+  TYPE:              'Type',
+  REQUIRED:          'Required',
+  MAPPING:           'Mapping',
+  FIELD_SELECTOR:    'Field Selector',   // optional — recommended column
+};
+
+/**
+ * Required columns that MUST exist in the Excel file.
+ * Typed as string[] — NOT as const.
+ */
+const REQUIRED_COLUMNS: string[] = [
+  'Product',
+  'Sub Segment',
+  'Formset',
+  'Form Name',
+  'Form ID',
+  'Category',
+  'Field',
+  'Type',
+  'Required',
+  'Mapping',
+];
+
+export class ExcelJSConfigLoader {
+
+  /**
+   * Reads the Excel file and returns all FormSetConfigs.
+   * Called by FormRegistry — cached after first call.
+   */
+  static async load(filePath: string): Promise<FormSetConfig[]> {
+    Logger.info(`ExcelJSConfigLoader: reading ${filePath}`);
+
+    const workbook = new Workbook();
+
+    try {
+      await workbook.xlsx.readFile(filePath);
+    } catch (err) {
+      throw new Error(
+        `ExcelJSConfigLoader: cannot read "${filePath}".\n` +
+        `Ensure the file exists at: src/coverage/data/forms-config.xlsx\n` +
+        `Error: ${(err as Error).message}`
+      );
+    }
+
+    const worksheet = workbook.worksheets[0];
+    if (!worksheet) {
+      throw new Error(`ExcelJSConfigLoader: no worksheets in "${filePath}".`);
+    }
+
+    Logger.info(
+      `ExcelJSConfigLoader: sheet "${worksheet.name}" | ${worksheet.rowCount} rows`
+    );
+
+    const headerRow   = worksheet.getRow(1);
+    const columnIndex = this.buildColumnIndex(headerRow, filePath);
+    const rows: Record<string, string>[] = [];
+
+    worksheet.eachRow((row: Row, rowNumber: number) => {
+      if (rowNumber === 1) return;
+
+      const record: Record<string, string> = {};
+      let   hasData = false;
+
+      for (const colName of Object.keys(columnIndex)) {
+        const colIdx        = columnIndex[colName];
+        const cell          = row.getCell(colIdx);
+        const value         = this.readCellValue(cell);
+        record[colName]     = value;
+        if (value) hasData  = true;
+      }
+
+      if (hasData) rows.push(record);
+    });
+
+    Logger.info(`ExcelJSConfigLoader: parsed ${rows.length} data rows`);
+
+    const result = this.buildFormSetConfigs(rows);
+
+    Logger.info(
+      `ExcelJSConfigLoader: ${result.length} form sets | ` +
+      `${result.reduce((n, fs) => n + fs.forms.length, 0)} forms`
+    );
+
+    return result;
+  }
+
+  // ── Column Index ─────────────────────────────────────────────────────────────
+
+  private static buildColumnIndex(
+    headerRow: Row,
+    filePath:  string,
+  ): Record<string, number> {
+
+    const index: Record<string, number> = {};
+
+    headerRow.eachCell((cell: Cell, colNumber: number) => {
+      const header = this.readCellValue(cell).trim();
+      if (header) index[header] = colNumber;
+    });
+
+    const missing: string[] = REQUIRED_COLUMNS.filter(
+      (col) => index[col] === undefined
+    );
+
+    if (missing.length > 0) {
+      throw new Error(
+        `ExcelJSConfigLoader: missing columns in "${filePath}":\n` +
+        `  Missing: ${missing.join(', ')}\n` +
+        `  Found:   ${Object.keys(index).join(', ')}\n` +
+        `Column names are case-sensitive.`
+      );
+    }
+
+    return index;
+  }
+
+  // ── FormSet Hierarchy Builder ─────────────────────────────────────────────────
+
+  private static buildFormSetConfigs(rows: Record<string, string>[]): FormSetConfig[] {
+
+    /**
+     * Key: Product || SubSegment || Formset
+     * The Formset column value is used directly (e.g. "Builder's Risk, Construction Block")
+     * The formSetName for the radio button is derived by taking the first segment before comma.
+     */
+    const formSetMap = new Map<string, {
+      product:     string;
+      subSegment:  string;
+      formset:     string;
+      formSetName: string;
+      forms: Map<string, {
+        formId:     string;
+        formNumber: string;
+        formName:   string;
+        formOrder:  number;
+        category:   'Mandatory' | 'Optional';
+        fields:     FormFieldConfig[];
+      }>;
+    }>();
+
+    for (const row of rows) {
+
+      const product    = row[COL.PRODUCT]?.trim();
+      const subSegment = row[COL.SUB_SEGMENT]?.trim() ?? '';
+      const formset    = row[COL.FORMSET]?.trim() ?? '';
+      const formName   = row[COL.FORM_NAME]?.trim();
+
+      if (!product || !formName) continue;
+
+      const formSetKey = `${product}||${subSegment}||${formset}`;
+      const formId     = row[COL.FORM_ID]?.trim() ?? '';
+      const formNumber = row[COL.FORM_NUMBER]?.trim() ?? '';
+      const formKey    = `${formId}||${formName}`;
+
+      // Derive the radio button label from formset:
+      // "Builder's Risk, Construction Block" → "Builder's Risk"
+      const formSetName = formset.split(',')[0].trim();
+
+      if (!formSetMap.has(formSetKey)) {
+        formSetMap.set(formSetKey, {
+          product,
+          subSegment,
+          formset,
+          formSetName,
+          forms: new Map(),
+        });
+      }
+
+      const fsEntry = formSetMap.get(formSetKey)!;
+
+      if (!fsEntry.forms.has(formKey)) {
+        const orderRaw = row[COL.FORM_ORDER]?.trim();
+        fsEntry.forms.set(formKey, {
+          formId,
+          formNumber,
+          formName,
+          formOrder:  orderRaw ? parseInt(orderRaw, 10) || 0 : 0,
+          category:   this.parseCategory(row[COL.CATEGORY], formName),
+          fields:     [],
+        });
+      }
+
+      const formEntry  = fsEntry.forms.get(formKey)!;
+      const fieldLabel = row[COL.FIELD]?.trim();
+
+      if (fieldLabel) {
+        formEntry.fields.push(this.buildField(row, formId, fieldLabel));
+      }
+    }
+
+    return Array.from(formSetMap.values()).map(
+      ({ product, subSegment, formset, formSetName, forms }) => ({
+        product,
+        subSegment,
+        formset,
+        formSetName,
+        // Sort forms by formOrder
+        forms: Array.from(forms.values()).sort((a, b) => a.formOrder - b.formOrder),
+      })
+    );
+  }
+
+  // ── Field Builder ─────────────────────────────────────────────────────────────
+
+  private static buildField(
+    row:        Record<string, string>,
+    formId:     string,
+    fieldLabel: string,
+  ): FormFieldConfig {
+
+    const mapping    = row[COL.MAPPING]?.trim() ?? '';
+    const hasMapping = mapping !== '' && mapping.toLowerCase() !== 'n/a';
+    const typeRaw    = row[COL.TYPE]?.trim() ?? 'Text';
+    const parsedType = this.parseType(typeRaw);
+
+    const config: FormFieldConfig = {
+      fieldLabel,
+      fieldSelector:    this.resolveSelector(row, formId, fieldLabel),
+      type:             parsedType,
+      required:         row[COL.REQUIRED]?.trim().toLowerCase() === 'yes',
+      mapping,
+      statesApplicable: row[COL.STATES_APPLICABLE]?.trim() || 'All',
+      editable:         !hasMapping,
+    };
+
+    // Parse grid config if type is grid
+    if (parsedType === 'grid') {
+      config.gridConfig = this.parseGridConfig(typeRaw);
+    }
+
+    return config;
+  }
+
+  // ── Selector Resolution ───────────────────────────────────────────────────────
+
+  private static resolveSelector(
+    row:        Record<string, string>,
+    formId:     string,
+    fieldLabel: string,
+  ): string {
+    const fieldSelectorKey = COL.FIELD_SELECTOR;
+    const explicit         = row[fieldSelectorKey]?.trim();
+    if (explicit) return `#${explicit}`;
+
+    const slug = fieldLabel
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, '')
+      .trim()
+      .replace(/\s+/g, '-');
+
+    const derived = `#${formId.toLowerCase().replace(/\s+/g, '-')}-${slug}`;
+
+    Logger.warn(
+      `ExcelJSConfigLoader: "Field Selector" missing for "${fieldLabel}". ` +
+      `Using derived: ${derived}.`
+    );
+
+    return derived;
+  }
+
+  // ── Parsers ───────────────────────────────────────────────────────────────────
+
+  private static parseCategory(
+    raw:      string | undefined,
+    formName: string,
+  ): 'Mandatory' | 'Optional' {
+    const value = raw?.trim();
+    if (value === 'Mandatory') return 'Mandatory';
+    if (value === 'Optional')  return 'Optional';
+    Logger.warn(`Unknown category "${value}" for "${formName}" — defaulting to Optional`);
+    return 'Optional';
+  }
+
+  /**
+   * Parses field type from the Excel Type column.
+   *
+   * Simple cases: 'Text' → 'text', 'Date' → 'date'
+   *
+   * Grid case (from screenshot):
+   *   "Grid [Columns: Loc. No(s), Bldg.No(s), %Deductible] [Rows 3]" → 'grid'
+   *   "Grid [Rows: Test]" → 'grid'
+   */
+  private static parseType(raw: string): FieldType {
+    const normalised = raw.trim().toLowerCase();
+
+    if (normalised.startsWith('grid')) return 'grid';
+
+    const typeMap: Record<string, FieldType> = {
+      'text':     'text',
+      'number':   'number',
+      'dropdown': 'dropdown',
+      'select':   'dropdown',
+      'checkbox': 'checkbox',
+      'radio':    'radio',
+      'date':     'date',
+      'textarea': 'textarea',
+    };
+
+    const mapped = typeMap[normalised];
+    if (!mapped) Logger.warn(`Unknown type "${raw}" — defaulting to text`);
+    return mapped ?? 'text';
+  }
+
+  /**
+   * Parses Grid configuration from the Type column value.
+   *
+   * Input:  "Grid [Columns: Loc. No(s), Bldg.No(s), %Deductible] [Rows 3]"
+   * Output: { columns: ['Loc. No(s)', 'Bldg.No(s)', '%Deductible'], rowCount: 3 }
+   *
+   * Input:  "Grid [Rows: Test]"
+   * Output: { columns: [], rowCount: 0 }
+   */
+  private static parseGridConfig(raw: string): GridConfig {
+    const columns:  string[] = [];
+    let   rowCount: number   = 0;
+
+    // Extract columns: [Columns: col1, col2, col3]
+    const colMatch = raw.match(/\[Columns:\s*([^\]]+)\]/i);
+    if (colMatch) {
+      colMatch[1].split(',').forEach((c) => {
+        const trimmed = c.trim();
+        if (trimmed) columns.push(trimmed);
+      });
+    }
+
+    // Extract row count: [Rows 3] or [Rows: Test]
+    const rowMatch = raw.match(/\[Rows\s*:?\s*(\d+)\]/i);
+    if (rowMatch) {
+      rowCount = parseInt(rowMatch[1], 10) || 0;
+    }
+
+    return { columns, rowCount };
+  }
+
+  // ── Cell Reader ───────────────────────────────────────────────────────────────
+
+  private static readCellValue(cell: Cell): string {
+    const value = cell.value;
+    if (value === null || value === undefined) return '';
+
+    if (typeof value === 'object' && 'richText' in value) {
+      return (value as CellRichTextValue).richText.map((r) => r.text ?? '').join('');
+    }
+    if (typeof value === 'object' && 'result' in value) {
+      const r = (value as CellFormulaValue).result;
+      return r !== null && r !== undefined ? String(r) : '';
+    }
+    if (typeof value === 'object' && 'text' in value && 'hyperlink' in value) {
+      return String((value as CellHyperlinkValue).text ?? '');
+    }
+    if (value instanceof Date) return value.toLocaleDateString('en-US');
+    return String(value);
+  }
+}
+SECTION 2 — Data Manager
+src/data/managers/SubmissionManager.ts
+
+What changed: Updated for displayId + submissionUrl storage. Updated updateQuoteId signature. Added getLatestWithQuote().
+
+typescript
+import fs   from 'fs';
+import path from 'path';
+import { StoredSubmission } from '../../types/submission.types';
+import { Logger }           from '../../utils/LoggerUtils';
+
+const STORE_FILE = path.resolve('storage-states', 'submissions.json');
+
+/**
+ * SubmissionManager
+ *
+ * Persists submission data between test runs.
+ *
+ * Storage key = metrixSubmissionId (the query param value from the URL)
+ *
+ * UPDATED:
+ *   - StoredSubmission now includes displayId and submissionUrl
+ *   - quoteId is the user-entered Quote ID (e.g. 'QO-2')
+ *   - updateQuoteId(metrixSubmissionId, quoteId) updates stored quote
+ */
+export class SubmissionManager {
+
+  static store(submission: StoredSubmission): void {
+    const data = this.readAll();
+    data[submission.metrixSubmissionId] = submission;
+    this.write(data);
+    Logger.info(`Submission stored: ${submission.metrixSubmissionId}`);
+  }
+
+  static updateQuoteId(metrixSubmissionId: string, quoteId: string): void {
+    const data     = this.readAll();
+    const existing = data[metrixSubmissionId];
+
+    if (!existing) {
+      Logger.warn(`SubmissionManager.updateQuoteId: no submission for ${metrixSubmissionId}`);
+      return;
+    }
+
+    existing.quoteId = quoteId;
+    data[metrixSubmissionId] = existing;
+    this.write(data);
+    Logger.info(`QuoteId updated for ${metrixSubmissionId}: ${quoteId}`);
+  }
+
+  static get(metrixSubmissionId: string): StoredSubmission | null {
+    return this.readAll()[metrixSubmissionId] ?? null;
+  }
+
+  static getAll(): StoredSubmission[] {
+    return Object.values(this.readAll());
+  }
+
+  static getLatest(): StoredSubmission | null {
+    const all = this.getAll();
+    if (!all.length) return null;
+    return all.sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+
+  static getLatestWithQuote(): StoredSubmission | null {
+    const all = this.getAll().filter(
+      (s) => s.quoteId && s.quoteId.trim() !== ''
+    );
+    if (!all.length) return null;
+    return all.sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+
+  static remove(metrixSubmissionId: string): void {
+    const data = this.readAll();
+    delete data[metrixSubmissionId];
+    this.write(data);
+  }
+
+  static clearAll(): void {
+    this.write({});
+    Logger.info('All submissions cleared');
+  }
+
+  private static readAll(): Record<string, StoredSubmission> {
+    if (!fs.existsSync(STORE_FILE)) return {};
+    try { return JSON.parse(fs.readFileSync(STORE_FILE, 'utf-8')); }
+    catch { return {}; }
+  }
+
+  private static write(data: Record<string, StoredSubmission>): void {
+    fs.mkdirSync(path.dirname(STORE_FILE), { recursive: true });
+    fs.writeFileSync(STORE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  }
+}
+SECTION 3 — Page Objects
+src/pages/SubmissionOverviewPage.ts
+
+What changed: navigate() now uses UrlHelper.buildSubmissionUrl(baseUrl, displayId, metrixSubmissionId). All read-only fields use innerText(). Spinner handling included.
+
+typescript
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage }               from './base/BasePage';
+import { SubmissionFormData }     from '../types/submission.types';
+import { DateHelper }             from '../helpers/DateHelper';
+import { UrlHelper }              from '../helpers/UrlHelper';
+import { EnvironmentConfig }      from '../config/environment.config';
+import { AssertionUtils }         from '../utils/AssertionUtils';
+
+/**
+ * SubmissionOverviewPage
+ *
+ * Handles the read-only summary bar at the TOP of the submission detail page
+ * and all tab navigation within the submission.
+ *
+ * ACTUAL PAGE STRUCTURE (from screenshots):
+ *
+ *   TOP BAR (read-only):
+ *     NAMED INSURED  SUBMISSION NO  POLICY NO  INCEPTION DATE  BROKER  ZONE  UT
+ *     SUBHUB REF NO  POLICY TYPE    PRODUCT SUB-SEGMENT  UNDERWRITER  CURRENT ASSIGNEE
+ *     Status dropdown (Open ▼)   UW Rationale button
+ *
+ *   LEFT SIDEBAR (NB-2026-00267):
+ *     SUBMISSION → General Information
+ *     RISK & PRICING → Underwriting File
+ *       ├── Location Management
+ *       ├── Exposures & Quotes      ← for coverage/quote flow
+ *       ├── CAT Modeling
+ *       ├── Reinsurance
+ *       └── Account Review
+ *     ARC → Manage ARC Requests
+ *     REFERRALS → Manage Referrals
+ *     TRANSACTIONS
+ *
+ *   MAIN CONTENT AREA:
+ *     Changes based on sidebar item clicked
+ *
+ * URL: /#/display/{displayId}?metrixSubmissionId={metrixSubmissionId}
+ *
+ * SETUP REQUIRED: Replace all YOUR_*_SELECTOR with actual selectors.
+ */
+export class SubmissionOverviewPage extends BasePage {
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+  private readonly loadingSpinner:        Locator;
+  private readonly pageLoadedIndicator:   Locator;
+
+  // ── Top Bar Read-Only Fields (spans/divs — Q1 confirmed) ──────────────────
+  private readonly namedInsuredValue:     Locator;
+  private readonly submissionNoValue:     Locator;
+  private readonly inceptionDateValue:    Locator;
+  private readonly policyNumberValue:     Locator;
+  private readonly underwriterValue:      Locator;
+  private readonly currentAssigneeValue:  Locator;
+  private readonly statusDropdown:        Locator;
+  private readonly expirationDateValue:   Locator;
+
+  // ── Sidebar Navigation ─────────────────────────────────────────────────────
+  private readonly generalInformationLink:   Locator;
+  private readonly exposuresAndQuotesLink:   Locator;
+  private readonly locationManagementLink:   Locator;
+  private readonly catModelingLink:          Locator;
+  private readonly reinsuranceLink:          Locator;
+  private readonly accountReviewLink:        Locator;
+  private readonly manageARCRequestsLink:    Locator;
+  private readonly manageReferralsLink:      Locator;
+
+  // ── General Information Sub-tabs (visible when General Information active) ─
+  private readonly insuredInfoTab:  Locator;
+  private readonly policyInfoTab:   Locator;
+  private readonly brokerInfoTab:   Locator;
+
+  // ── Top-right action buttons ──────────────────────────────────────────────
+  private readonly uwRationaleButton: Locator;
+
+  constructor(page: Page) {
+    super(page);
+
+    // Loading
+    this.loadingSpinner      = page.locator('YOUR_SPINNER_SELECTOR');
+    this.pageLoadedIndicator = page.locator('YOUR_PAGE_LOADED_INDICATOR_SELECTOR');
+
+    // Top bar fields (all read-only display elements)
+    this.namedInsuredValue    = page.locator('YOUR_NAMED_INSURED_VALUE_SELECTOR');
+    this.submissionNoValue    = page.locator('YOUR_SUBMISSION_NO_VALUE_SELECTOR');
+    this.inceptionDateValue   = page.locator('YOUR_INCEPTION_DATE_VALUE_SELECTOR');
+    this.policyNumberValue    = page.locator('YOUR_POLICY_NUMBER_VALUE_SELECTOR');
+    this.underwriterValue     = page.locator('YOUR_UNDERWRITER_VALUE_SELECTOR');
+    this.currentAssigneeValue = page.locator('YOUR_CURRENT_ASSIGNEE_VALUE_SELECTOR');
+    this.statusDropdown       = page.locator('YOUR_STATUS_DROPDOWN_SELECTOR');
+    this.expirationDateValue  = page.locator('YOUR_EXPIRATION_DATE_VALUE_SELECTOR');
+
+    // Sidebar navigation links
+    this.generalInformationLink  = page.locator('YOUR_GENERAL_INFORMATION_LINK_SELECTOR');
+    this.exposuresAndQuotesLink  = page.locator('YOUR_EXPOSURES_AND_QUOTES_LINK_SELECTOR');
+    this.locationManagementLink  = page.locator('YOUR_LOCATION_MANAGEMENT_LINK_SELECTOR');
+    this.catModelingLink         = page.locator('YOUR_CAT_MODELING_LINK_SELECTOR');
+    this.reinsuranceLink         = page.locator('YOUR_REINSURANCE_LINK_SELECTOR');
+    this.accountReviewLink       = page.locator('YOUR_ACCOUNT_REVIEW_LINK_SELECTOR');
+    this.manageARCRequestsLink   = page.locator('YOUR_MANAGE_ARC_REQUESTS_LINK_SELECTOR');
+    this.manageReferralsLink     = page.locator('YOUR_MANAGE_REFERRALS_LINK_SELECTOR');
+
+    // General Information sub-tabs
+    this.insuredInfoTab = page.locator('YOUR_INSURED_INFO_TAB_SELECTOR');
+    this.policyInfoTab  = page.locator('YOUR_POLICY_INFO_TAB_SELECTOR');
+    this.brokerInfoTab  = page.locator('YOUR_BROKER_INFO_TAB_SELECTOR');
+
+    // Action buttons
+    this.uwRationaleButton = page.locator('YOUR_UW_RATIONALE_BUTTON_SELECTOR');
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  /**
+   * Navigates to a submission using both IDs.
+   * URL format: /#/display/{displayId}?metrixSubmissionId={metrixSubmissionId}
+   */
+  async navigate(displayId: string, metrixSubmissionId: string): Promise<void> {
+    const config = EnvironmentConfig.getConfig();
+    const url    = UrlHelper.buildSubmissionUrl(config.baseUrl, displayId, metrixSubmissionId);
+
+    await this.page.goto(url);
+    await this.page.waitForURL(
+      (u) => UrlHelper.isSubmissionPage(u),
+      { timeout: 30_000 },
+    );
+    await this.verifyPageLoaded();
+    this.log(`Navigated to Submission Overview | ${metrixSubmissionId}`);
+  }
+
+  /**
+   * Navigates using a stored submission's full URL (most reliable).
+   */
+  async navigateByUrl(submissionUrl: string): Promise<void> {
+    await this.page.goto(submissionUrl);
+    await this.page.waitForURL(
+      (u) => UrlHelper.isSubmissionPage(u),
+      { timeout: 30_000 },
+    );
+    await this.verifyPageLoaded();
+    this.log('Navigated to Submission Overview via stored URL');
+  }
+
+  async verifyPageLoaded(): Promise<void> {
+    try {
+      await this.loadingSpinner.waitFor({ state: 'hidden', timeout: 30_000 });
+    } catch {
+      this.log('Spinner not detected');
+    }
+    await this.page.waitForLoadState('networkidle');
+    await this.pageLoadedIndicator.waitFor({ state: 'visible', timeout: 15_000 });
+    this.log('Submission page loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Top Bar Field Readers ──────────────────────────────────────────────────
+
+  private async getFieldText(locator: Locator): Promise<string> {
+    return (await locator.innerText()).trim();
+  }
+
+  async getNamedInsured():     Promise<string> { return this.getFieldText(this.namedInsuredValue);    }
+  async getSubmissionNumber():  Promise<string> { return this.getFieldText(this.submissionNoValue);    }
+  async getInceptionDate():    Promise<string> { return this.getFieldText(this.inceptionDateValue);   }
+  async getPolicyNumber():     Promise<string> { return this.getFieldText(this.policyNumberValue);    }
+  async getUnderwriter():      Promise<string> { return this.getFieldText(this.underwriterValue);     }
+  async getCurrentAssignee():  Promise<string> { return this.getFieldText(this.currentAssigneeValue); }
+  async getStatus():           Promise<string> { return this.getFieldText(this.statusDropdown);       }
+
+  // ── Top Bar Assertions ─────────────────────────────────────────────────────
+
+  async assertNamedInsured(expected: string): Promise<void> {
+    const actual = await this.getNamedInsured();
+    expect(actual, `Named Insured: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Named Insured: ${actual}`);
+  }
+
+  async assertSubmissionNumber(expected: string): Promise<void> {
+    const actual = await this.getSubmissionNumber();
+    expect(actual, `Submission No: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Submission No: ${actual}`);
+  }
+
+  async assertDefaultStatus(): Promise<void> {
+    const actual = await this.getStatus();
+    expect(actual, `Status should be "Open" but got "${actual}"`).toContain('Open');
+    this.log(`✅ Status: Open (default)`);
+  }
+
+  async assertStatus(expected: string): Promise<void> {
+    const actual = await this.getStatus();
+    expect(actual, `Status: expected "${expected}" got "${actual}"`).toContain(expected);
+    this.log(`✅ Status: ${actual}`);
+  }
+
+  async assertUnderwriter(expected: string): Promise<void> {
+    const actual = await this.getUnderwriter();
+    expect(actual, `Underwriter: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Underwriter: ${actual}`);
+  }
+
+  async assertCurrentAssignee(expected: string): Promise<void> {
+    const actual = await this.getCurrentAssignee();
+    expect(actual, `Current Assignee: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Current Assignee: ${actual}`);
+  }
+
+  async assertCurrentAssigneeMatchesUnderwriter(): Promise<void> {
+    const uw  = await this.getUnderwriter();
+    const ca  = await this.getCurrentAssignee();
+    expect(ca, `Current Assignee "${ca}" must match Underwriter "${uw}"`).toBe(uw);
+    this.log(`✅ Current Assignee matches Underwriter: ${uw}`);
+  }
+
+  async assertInceptionDate(expected: string): Promise<void> {
+    const actual = await this.getInceptionDate();
+    expect(actual, `Inception Date: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Inception Date: ${actual}`);
+  }
+
+  async assertPolicyNumber(expected: string = 'None'): Promise<void> {
+    const actual = await this.getPolicyNumber();
+    expect(actual, `Policy Number: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Policy Number: ${actual}`);
+  }
+
+  // ── Sidebar Navigation ─────────────────────────────────────────────────────
+
+  /**
+   * Clicks "General Information" in sidebar → shows Insured/Policy/Broker sub-tabs.
+   */
+  async clickGeneralInformation(): Promise<void> {
+    await this.generalInformationLink.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked General Information');
+  }
+
+  /**
+   * Clicks "Exposures & Quotes" in sidebar → shows quote table.
+   * From there, create new quote or open existing quote.
+   */
+  async clickExposuresAndQuotes(): Promise<void> {
+    await this.exposuresAndQuotesLink.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Exposures & Quotes');
+  }
+
+  async clickLocationManagement(): Promise<void> {
+    await this.locationManagementLink.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Location Management');
+  }
+
+  async clickManageReferrals(): Promise<void> {
+    await this.manageReferralsLink.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Manage Referrals');
+  }
+
+  // ── General Information Sub-tabs ───────────────────────────────────────────
+
+  /**
+   * Navigates to General Information → Insured Information tab.
+   * Same pattern seen in screenshot Image 19.
+   */
+  async clickInsuredInformationTab(): Promise<void> {
+    await this.clickGeneralInformation();
+    await this.insuredInfoTab.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Insured Information tab');
+  }
+
+  async clickPolicyInformationTab(): Promise<void> {
+    await this.clickGeneralInformation();
+    await this.policyInfoTab.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Policy Information tab');
+  }
+
+  async clickBrokerInformationTab(): Promise<void> {
+    await this.clickGeneralInformation();
+    await this.brokerInfoTab.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Broker Information tab');
+  }
+
+  // ── Sidebar Visibility Assertions ──────────────────────────────────────────
+
+  async assertSidebarVisible(): Promise<void> {
+    await expect(this.generalInformationLink,  'General Information link').toBeVisible();
+    await expect(this.exposuresAndQuotesLink,  'Exposures & Quotes link').toBeVisible();
+    this.log('✅ Sidebar navigation visible');
+  }
+
+  // ── Combined Assertion ─────────────────────────────────────────────────────
+
+  async assertTopBarMatchesSubmissionData(data: SubmissionFormData): Promise<void> {
+    this.log('--- Validating top bar fields ---');
+    await this.assertNamedInsured(data.insured.namedInsured);
+    await this.assertSubmissionNumber(data.submissionNumber);
+    await this.assertInceptionDate(data.inceptionDate);
+    await this.assertDefaultStatus();
+    await this.assertPolicyNumber('None');
+    await this.assertCurrentAssigneeMatchesUnderwriter();
+    await this.assertSidebarVisible();
+    this.log('--- Top bar validated ✅ ---');
+  }
+
+  // For alias compatibility
+  async assertAllFieldsMatchSubmissionData(
+    data:       SubmissionFormData,
+    primaryUW?: string,
+  ): Promise<void> {
+    await this.assertTopBarMatchesSubmissionData(data);
+    if (primaryUW) {
+      await this.assertUnderwriter(primaryUW);
+      await this.assertCurrentAssignee(primaryUW);
+    }
+  }
+
+  async logAllFieldValues(): Promise<void> {
+    this.log(`Named Insured:    ${await this.getNamedInsured()}`);
+    this.log(`Submission No:    ${await this.getSubmissionNumber()}`);
+    this.log(`Inception Date:   ${await this.getInceptionDate()}`);
+    this.log(`Policy Number:    ${await this.getPolicyNumber()}`);
+    this.log(`Status:           ${await this.getStatus()}`);
+    this.log(`Underwriter:      ${await this.getUnderwriter()}`);
+    this.log(`Current Assignee: ${await this.getCurrentAssignee()}`);
+  }
+}
+src/pages/CoverageExposuresPage.ts
+
+Completely rewritten based on screenshots. The "Exposures & Quotes" page is accessed via the sidebar, shows a quote table, and creates quotes via a slide-in panel (not a generate quote button).
+
+typescript
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage }               from './base/BasePage';
+
+/**
+ * New Quote data — filled in the "New Quote" panel (Image 17 from screenshots)
+ */
+export interface NewQuoteData {
+  quoteId:      string;   // user-entered (e.g. 'QO-2')
+  effectiveDate: string;  // MM/DD/YYYY
+  product:      string;   // e.g. 'Construction'
+  subSegment:   string;   // e.g. 'Construction-Builder's Risk'
+  description?: string;
+}
+
+/**
+ * CoverageExposuresPage
+ *
+ * Handles the "Exposures & Quotes" section accessed via the sidebar link.
+ *
+ * ACTUAL FLOW from screenshots (Image 18, 17):
+ *
+ *   Sidebar: "Exposures & Quotes"
+ *     → "Exposures & Quotes" page with tabs: Quote | Binder | Premium Booking | Policy
+ *     → "Active Quotes" / "Archived Quotes" radio buttons
+ *     → Quote table: QUOTE ID | CLONED FROM | PRODUCT ID(S) | DESCRIPTION | STATE | ...
+ *     → Buttons: "Finalize Quote >", "Send To >", "+ Add New", "Generate Binder >"
+ *
+ *   Click "+ Add New":
+ *     → "New Quote" panel slides in from right
+ *     → Fill: QUOTE ID, EFFECTIVE DATE, PRODUCT, SUB-SEGMENT, DESCRIPTION
+ *     → Click "Create" → navigates to Quote Options page (SAME TAB)
+ *
+ *   Existing quote:
+ *     → Click Quote ID hyperlink in table
+ *     → Opens Quote Options page (SAME TAB)
+ *
+ * SETUP REQUIRED: Replace all YOUR_*_SELECTOR placeholders.
+ */
+export class CoverageExposuresPage extends BasePage {
+
+  // ── Page State ─────────────────────────────────────────────────────────────
+  private readonly pageLoadedIndicator:  Locator;
+  private readonly loadingSpinner:       Locator;
+
+  // ── Main Page Tabs ─────────────────────────────────────────────────────────
+  private readonly quoteTab:            Locator;  // "Quote" tab (active by default)
+  private readonly binderTab:           Locator;  // "Binder" tab
+  private readonly premiumBookingTab:   Locator;  // "Premium Booking" tab
+  private readonly policyTab:           Locator;  // "Policy" tab
+
+  // ── Active/Archived Quote Radio ────────────────────────────────────────────
+  private readonly activeQuotesRadio:   Locator;
+  private readonly archivedQuotesRadio: Locator;
+
+  // ── Quote Table ────────────────────────────────────────────────────────────
+  private readonly quotesTable:         Locator;
+  private readonly noDataFoundText:     Locator;
+
+  // ── Action Buttons ─────────────────────────────────────────────────────────
+  private readonly addNewButton:        Locator;   // "+ Add New"
+  private readonly finalizeQuoteButton: Locator;   // "Finalize Quote >"
+  private readonly sendToButton:        Locator;   // "Send To >"
+  private readonly keywordSearch:       Locator;   // search input
+  private readonly filterButton:        Locator;   // FILTER button
+  private readonly clearAllButton:      Locator;   // Clear All button
+
+  // ── New Quote Panel ────────────────────────────────────────────────────────
+  // Slide-in panel that appears after clicking "+ Add New" (Image 17)
+  private readonly newQuotePanel:         Locator;
+  private readonly newQuoteQuoteIdInput:  Locator;
+  private readonly newQuoteEffectiveDateInput: Locator;
+  private readonly newQuoteProductDropdown:   Locator;
+  private readonly newQuoteSubSegmentDropdown: Locator;
+  private readonly newQuoteDescriptionInput:  Locator;
+  private readonly newQuoteCancelButton:  Locator;
+  private readonly newQuoteCreateButton:  Locator;
+
+  constructor(page: Page) {
+    super(page);
+
+    this.pageLoadedIndicator  = page.locator('YOUR_EXPOSURES_PAGE_LOADED_INDICATOR');
+    this.loadingSpinner       = page.locator('YOUR_SPINNER_SELECTOR');
+
+    // Tabs
+    this.quoteTab           = page.locator('YOUR_QUOTE_TAB_SELECTOR');
+    this.binderTab          = page.locator('YOUR_BINDER_TAB_SELECTOR');
+    this.premiumBookingTab  = page.locator('YOUR_PREMIUM_BOOKING_TAB_SELECTOR');
+    this.policyTab          = page.locator('YOUR_POLICY_TAB_SELECTOR');
+
+    // Radio buttons
+    this.activeQuotesRadio   = page.locator('YOUR_ACTIVE_QUOTES_RADIO_SELECTOR');
+    this.archivedQuotesRadio = page.locator('YOUR_ARCHIVED_QUOTES_RADIO_SELECTOR');
+
+    // Table
+    this.quotesTable      = page.locator('YOUR_QUOTES_TABLE_SELECTOR');
+    this.noDataFoundText  = page.locator('YOUR_NO_DATA_FOUND_SELECTOR');
+
+    // Action buttons
+    this.addNewButton        = page.locator('YOUR_ADD_NEW_BUTTON_SELECTOR');
+    this.finalizeQuoteButton = page.locator('YOUR_FINALIZE_QUOTE_BUTTON_SELECTOR');
+    this.sendToButton        = page.locator('YOUR_SEND_TO_BUTTON_SELECTOR');
+    this.keywordSearch       = page.locator('YOUR_KEYWORD_SEARCH_INPUT_SELECTOR');
+    this.filterButton        = page.locator('YOUR_FILTER_BUTTON_SELECTOR');
+    this.clearAllButton      = page.locator('YOUR_CLEAR_ALL_BUTTON_SELECTOR');
+
+    // New Quote panel (slides in from right)
+    this.newQuotePanel              = page.locator('YOUR_NEW_QUOTE_PANEL_SELECTOR');
+    this.newQuoteQuoteIdInput       = page.locator('YOUR_NEW_QUOTE_QUOTE_ID_INPUT');
+    this.newQuoteEffectiveDateInput = page.locator('YOUR_NEW_QUOTE_EFFECTIVE_DATE_INPUT');
+    this.newQuoteProductDropdown    = page.locator('YOUR_NEW_QUOTE_PRODUCT_DROPDOWN');
+    this.newQuoteSubSegmentDropdown = page.locator('YOUR_NEW_QUOTE_SUB_SEGMENT_DROPDOWN');
+    this.newQuoteDescriptionInput   = page.locator('YOUR_NEW_QUOTE_DESCRIPTION_INPUT');
+    this.newQuoteCancelButton       = page.locator('YOUR_NEW_QUOTE_CANCEL_BUTTON');
+    this.newQuoteCreateButton       = page.locator('YOUR_NEW_QUOTE_CREATE_BUTTON');
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  /**
+   * This page is accessed via the sidebar — not a direct URL.
+   * Navigate via: SubmissionOverviewPage.clickExposuresAndQuotes()
+   * Then:         new CoverageExposuresPage(page)
+   */
+  async navigate(): Promise<void> {
+    throw new Error(
+      'CoverageExposuresPage is accessed via sidebar.\n' +
+      'Use: await submissionOverview.clickExposuresAndQuotes();\n' +
+      'Then: const coveragePage = new CoverageExposuresPage(page);'
+    );
+  }
+
+  async verifyPageLoaded(): Promise<void> {
+    try {
+      await this.loadingSpinner.waitFor({ state: 'hidden', timeout: 15_000 });
+    } catch {
+      this.log('Spinner not detected');
+    }
+    await this.page.waitForLoadState('networkidle');
+    await this.pageLoadedIndicator.waitFor({ state: 'visible', timeout: 15_000 });
+    this.log('Exposures & Quotes page loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Quote Table ────────────────────────────────────────────────────────────
+
+  async assertNoQuotesFound(): Promise<void> {
+    await expect(this.noDataFoundText, 'No data found text should be visible').toBeVisible();
+    this.log('✅ No quotes found (empty state)');
+  }
+
+  async assertQuoteInTable(quoteId: string): Promise<void> {
+    await expect(
+      this.quotesTable.locator(`tr:has-text("${quoteId}")`),
+      `Quote "${quoteId}" should appear in table`
+    ).toBeVisible();
+    this.log(`✅ Quote ${quoteId} visible in table`);
+  }
+
+  async assertQuoteNotInTable(quoteId: string): Promise<void> {
+    await expect(
+      this.quotesTable.locator(`tr:has-text("${quoteId}")`),
+      `Quote "${quoteId}" should NOT appear in table`
+    ).toBeHidden();
+  }
+
+  // ── New Quote Creation ─────────────────────────────────────────────────────
+
+  /**
+   * Clicks the "+ Add New" button.
+   * The "New Quote" panel slides in from the right side of the page.
+   * Verified in Image 17 from screenshots.
+   */
+  async clickAddNew(): Promise<void> {
+    await expect(this.addNewButton, '"+ Add New" button should be visible').toBeVisible();
+    await this.addNewButton.click();
+    await this.newQuotePanel.waitFor({ state: 'visible', timeout: 10_000 });
+    this.log('Clicked "+ Add New" — New Quote panel visible');
+  }
+
+  /**
+   * Fills the New Quote panel fields.
+   * Fields visible in Image 17: QUOTE ID, EFFECTIVE DATE, PRODUCT, SUB-SEGMENT, DESCRIPTION
+   */
+  async fillNewQuotePanel(data: NewQuoteData): Promise<void> {
+    await this.newQuoteQuoteIdInput.fill(data.quoteId);
+    await this.newQuoteEffectiveDateInput.fill(data.effectiveDate);
+    await this.newQuoteEffectiveDateInput.press('Tab');
+
+    // Product dropdown — click to open, select option
+    await this.newQuoteProductDropdown.click();
+    await this.page.waitForTimeout(500);
+    await this.page.locator(`[role="option"]:has-text("${data.product}")`).first().click();
+
+    // Sub-segment dropdown — loads after product is selected
+    await this.page.waitForTimeout(500);
+    await this.newQuoteSubSegmentDropdown.click();
+    await this.page.waitForTimeout(500);
+    await this.page.locator(`[role="option"]:has-text("${data.subSegment}")`).first().click();
+
+    if (data.description) {
+      await this.newQuoteDescriptionInput.fill(data.description);
+    }
+
+    this.log(
+      `Filled New Quote: ID=${data.quoteId}, Product=${data.product}, SubSeg=${data.subSegment}`
+    );
+  }
+
+  /**
+   * Clicks "Create" in the New Quote panel.
+   * This navigates to the Quote Options page in the SAME TAB.
+   * No new tab opens (confirmed from actual application flow).
+   */
+  async clickCreate(): Promise<void> {
+    await expect(this.newQuoteCreateButton, 'Create button should be visible').toBeVisible();
+    await this.newQuoteCreateButton.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Create — navigated to Quote Options (same tab)');
+  }
+
+  /**
+   * Complete flow: fill New Quote panel and create.
+   * Returns void — the QuotePage is on the SAME page reference.
+   *
+   * After calling this, create QuotePage with the same page:
+   *   await coveragePage.createNewQuote(data);
+   *   const quotePage = new QuotePage(page); // same ref
+   */
+  async createNewQuote(data: NewQuoteData): Promise<void> {
+    await this.clickAddNew();
+    await this.fillNewQuotePanel(data);
+    await this.clickCreate();
+    this.log(`Quote created: ${data.quoteId}`);
+  }
+
+  /**
+   * Opens an existing quote by clicking its Quote ID hyperlink in the table.
+   * Q34: Subsequent visits use the link in the quotes table.
+   * Q38: Always use latest quote — pass stored.quoteId.
+   *
+   * After clicking, use same page reference for QuotePage:
+   *   await coveragePage.openQuoteByLink(stored.quoteId);
+   *   const quotePage = new QuotePage(page); // same ref
+   */
+  async openQuoteByLink(quoteId: string): Promise<void> {
+    this.log(`Opening quote by link: ${quoteId}`);
+
+    // Try multiple selector strategies for the quote link
+    const quoteLink = this.quotesTable
+      .locator(`a:has-text("${quoteId}")`)
+      .or(this.quotesTable.locator(`td:has-text("${quoteId}") a`))
+      .or(this.quotesTable.locator(`[data-quote-id="${quoteId}"]`))
+      .first();
+
+    await expect(
+      quoteLink,
+      `Quote link "${quoteId}" should be visible in quotes table`
+    ).toBeVisible();
+
+    await quoteLink.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log(`Opened quote: ${quoteId}`);
+  }
+
+  // ── Action Button Assertions ───────────────────────────────────────────────
+
+  async assertAddNewButtonVisible(): Promise<void> {
+    await expect(this.addNewButton, '"+ Add New" should be visible').toBeVisible();
+  }
+
+  async assertFinalizeQuoteButtonVisible(): Promise<void> {
+    await expect(this.finalizeQuoteButton, '"Finalize Quote >" should be visible').toBeVisible();
+  }
+
+  async cancelNewQuotePanel(): Promise<void> {
+    await this.newQuoteCancelButton.click();
+    await this.newQuotePanel.waitFor({ state: 'hidden', timeout: 5_000 });
+    this.log('Cancelled New Quote panel');
+  }
+}
+src/pages/QuotePage.ts
+
+Completely rewritten. Based on screenshots showing Quote Options page with 4 steps: 01 Quote Details | 02 Forms | 03 Forms Preview | 04 Form Set Order. All in the same tab.
+
+typescript
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage }               from './base/BasePage';
+import { DropdownComponent }      from '../components/DropdownComponent';
+
+/**
+ * QuotePage
+ *
+ * Handles the Quote Options page within the submission.
+ * Accessed via SAME TAB (no new tab opens).
+ *
+ * ACTUAL PAGE STRUCTURE (from screenshots Image 10, 15, 16):
+ *
+ *   "< Quote Options   QO-2"  ← breadcrumb with quote ID badge
+ *
+ *   General Quote Information:
+ *     QUOTE ID (text input — user-entered, e.g. 'QO-2')
+ *     EFFECTIVE DATE (date input)
+ *     HQ STATE (dropdown — e.g. 'NY - New York')
+ *     PAYMENT PLAN (dropdown)
+ *     DESCRIPTION (textarea)
+ *
+ *   Step Tabs:
+ *     [01 Quote Details] [02 Forms] [03 Forms Preview] [04 Form Set Order]
+ *
+ *   Quote Details (step 01) — Image 9, 11:
+ *     Product tab (e.g. BR-2) + "+ Add Product" button
+ *     PRODUCT ID (text, read-only): BR-2
+ *     PRODUCT (dropdown): Construction
+ *     SUB-SEGMENT (dropdown): Construction-Builder's Risk
+ *     Form Sets section (Builder's Risk radio)
+ *     Mandatory Forms section (checkboxes)
+ *     [scrolling down shows supplemental and deductibles]
+ *     "Forms >" button at bottom-right
+ *
+ *   Bottom buttons:
+ *     Cancel | Save | "Forms Preview >" (or "Forms >")
+ *
+ * NAVIGATION:
+ *   Reached via CoverageExposuresPage.createNewQuote() or openQuoteByLink()
+ *   Same page reference — no new tab.
+ *
+ * SETUP REQUIRED: Replace all YOUR_*_SELECTOR placeholders.
+ */
+export class QuotePage extends BasePage {
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+  private readonly loadingSpinner:        Locator;
+  private readonly pageLoadedIndicator:   Locator;
+
+  // ── Breadcrumb ─────────────────────────────────────────────────────────────
+  // "< Quote Options   QO-2" — contains the Quote ID badge
+  private readonly quoteBreadcrumb:       Locator;
+  private readonly quoteIdBadge:          Locator;  // "QO-2" text in breadcrumb
+  private readonly backToQuoteOptions:    Locator;  // "< Quote Options" link
+
+  // ── General Quote Information ──────────────────────────────────────────────
+  private readonly quoteIdInput:          Locator;
+  private readonly effectiveDateInput:    Locator;
+  private readonly hqStateDropdown:       DropdownComponent;
+  private readonly paymentPlanDropdown:   DropdownComponent;
+  private readonly descriptionInput:      Locator;
+
+  // ── Step Tabs ──────────────────────────────────────────────────────────────
+  private readonly quoteDetailsTab:       Locator;   // "01 Quote Details"
+  private readonly formsTab:              Locator;   // "02 Forms"
+  private readonly formsPreviewTab:       Locator;   // "03 Forms Preview"
+  private readonly formSetOrderTab:       Locator;   // "04 Form Set Order"
+
+  // ── Quote Details (Step 01) ────────────────────────────────────────────────
+  private readonly addProductButton:      Locator;   // "+ Add Product"
+  private readonly productIdInput:        Locator;   // PRODUCT ID (read-only)
+  private readonly productDropdown:       DropdownComponent;
+  private readonly subSegmentDropdown:    DropdownComponent;
+
+  // ── Bottom Navigation Buttons ──────────────────────────────────────────────
+  private readonly cancelButton:          Locator;
+  private readonly saveButton:            Locator;
+  private readonly formsNavigationButton: Locator;   // "Forms >" (step 01 → 02)
+  private readonly formsPreviewButton:    Locator;   // "Forms Preview >" (step 02 → 03)
+
+  constructor(page: Page) {
+    super(page);
+
+    this.loadingSpinner      = page.locator('YOUR_QUOTE_SPINNER_SELECTOR');
+    this.pageLoadedIndicator = page.locator('YOUR_QUOTE_PAGE_LOADED_INDICATOR');
+
+    this.quoteBreadcrumb     = page.locator('YOUR_QUOTE_BREADCRUMB_SELECTOR');
+    this.quoteIdBadge        = page.locator('YOUR_QUOTE_ID_BADGE_SELECTOR');
+    this.backToQuoteOptions  = page.locator('YOUR_BACK_TO_QUOTE_OPTIONS_SELECTOR');
+
+    // General Quote Information
+    this.quoteIdInput       = page.locator('YOUR_QUOTE_ID_INPUT_SELECTOR');
+    this.effectiveDateInput = page.locator('YOUR_EFFECTIVE_DATE_INPUT_SELECTOR');
+    this.hqStateDropdown    = new DropdownComponent(
+      page,
+      page.locator('YOUR_HQ_STATE_DROPDOWN_CONTAINER'),
+      page.locator('YOUR_HQ_STATE_DROPDOWN_INPUT'),
+    );
+    this.paymentPlanDropdown = new DropdownComponent(
+      page,
+      page.locator('YOUR_PAYMENT_PLAN_DROPDOWN_CONTAINER'),
+      page.locator('YOUR_PAYMENT_PLAN_DROPDOWN_INPUT'),
+    );
+    this.descriptionInput   = page.locator('YOUR_DESCRIPTION_INPUT_SELECTOR');
+
+    // Step tabs
+    this.quoteDetailsTab  = page.locator('YOUR_QUOTE_DETAILS_TAB_SELECTOR');
+    this.formsTab         = page.locator('YOUR_FORMS_STEP_TAB_SELECTOR');
+    this.formsPreviewTab  = page.locator('YOUR_FORMS_PREVIEW_STEP_TAB_SELECTOR');
+    this.formSetOrderTab  = page.locator('YOUR_FORM_SET_ORDER_TAB_SELECTOR');
+
+    // Quote Details
+    this.addProductButton   = page.locator('YOUR_ADD_PRODUCT_BUTTON_SELECTOR');
+    this.productIdInput     = page.locator('YOUR_PRODUCT_ID_INPUT_SELECTOR');
+    this.productDropdown    = new DropdownComponent(
+      page,
+      page.locator('YOUR_PRODUCT_DROPDOWN_CONTAINER'),
+      page.locator('YOUR_PRODUCT_DROPDOWN_INPUT'),
+    );
+    this.subSegmentDropdown = new DropdownComponent(
+      page,
+      page.locator('YOUR_SUB_SEGMENT_DROPDOWN_CONTAINER'),
+      page.locator('YOUR_SUB_SEGMENT_DROPDOWN_INPUT'),
+    );
+
+    // Bottom buttons
+    this.cancelButton           = page.locator('YOUR_CANCEL_BUTTON_SELECTOR');
+    this.saveButton             = page.locator('YOUR_SAVE_BUTTON_SELECTOR');
+    this.formsNavigationButton  = page.locator('YOUR_FORMS_BUTTON_SELECTOR');   // "Forms >"
+    this.formsPreviewButton     = page.locator('YOUR_FORMS_PREVIEW_BUTTON_SELECTOR'); // "Forms Preview >"
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  async navigate(): Promise<void> {
+    throw new Error(
+      'QuotePage cannot be navigated directly.\n' +
+      'Reach it via:\n' +
+      '  new quote:    await coveragePage.createNewQuote(data);\n' +
+      '  existing:     await coveragePage.openQuoteByLink(quoteId);\n' +
+      'Then:           const quotePage = new QuotePage(page); // same page ref'
+    );
+  }
+
+  /**
+   * Waits for the Quote Options page to fully load.
+   * Called after createNewQuote() or openQuoteByLink().
+   */
+  async verifyPageLoaded(): Promise<void> {
+    try {
+      await this.loadingSpinner.waitFor({ state: 'hidden', timeout: 30_000 });
+      this.log('Quote spinner gone');
+    } catch {
+      this.log('Quote spinner not detected — loaded instantly');
+    }
+    await this.page.waitForLoadState('networkidle');
+    await this.pageLoadedIndicator.waitFor({ state: 'visible', timeout: 15_000 });
+    this.log('Quote page fully loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Quote ID ───────────────────────────────────────────────────────────────
+
+  /**
+   * Gets the Quote ID from the breadcrumb badge.
+   * The breadcrumb shows: "< Quote Options   QO-2"
+   * The QO-2 badge is what we extract.
+   */
+  async getQuoteIdFromBreadcrumb(): Promise<string> {
+    return (await this.quoteIdBadge.innerText()).trim();
+  }
+
+  /**
+   * Gets the Quote ID from the General Quote Information input field.
+   */
+  async getQuoteIdFromInput(): Promise<string> {
+    return (await this.quoteIdInput.inputValue()).trim();
+  }
+
+  async assertQuoteId(expected: string): Promise<void> {
+    const fromInput = await this.getQuoteIdFromInput();
+    expect(
+      fromInput,
+      `Quote ID: expected "${expected}" got "${fromInput}"`
+    ).toBe(expected);
+    this.log(`✅ Quote ID: ${fromInput}`);
+  }
+
+  // ── General Quote Information ──────────────────────────────────────────────
+
+  async fillHqState(state: string): Promise<void> {
+    await this.hqStateDropdown.select(state);
+    this.log(`Filled HQ State: ${state}`);
+  }
+
+  async fillPaymentPlan(plan: string): Promise<void> {
+    await this.paymentPlanDropdown.select(plan);
+    this.log(`Filled Payment Plan: ${plan}`);
+  }
+
+  async fillDescription(text: string): Promise<void> {
+    await this.descriptionInput.fill(text);
+    this.log(`Filled Description`);
+  }
+
+  async assertEffectiveDate(expected: string): Promise<void> {
+    await expect(this.effectiveDateInput).toHaveValue(expected);
+    this.log(`✅ Effective Date: ${expected}`);
+  }
+
+  // ── Step Tab Navigation ────────────────────────────────────────────────────
+
+  /**
+   * Clicks "01 Quote Details" step tab.
+   */
+  async clickQuoteDetailsTab(): Promise<void> {
+    await this.quoteDetailsTab.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Quote Details tab (01)');
+  }
+
+  /**
+   * Clicks "02 Forms" step tab.
+   */
+  async clickFormsTab(): Promise<void> {
+    await this.formsTab.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Forms tab (02)');
+  }
+
+  /**
+   * Clicks "Forms >" navigation button at bottom right (step 01 → 02).
+   * This is different from clicking the "02 Forms" tab.
+   */
+  async clickFormsNavigationButton(): Promise<void> {
+    await expect(
+      this.formsNavigationButton,
+      '"Forms >" button should be visible'
+    ).toBeVisible();
+    await this.formsNavigationButton.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked "Forms >" — navigated to Forms step (02)');
+  }
+
+  /**
+   * Clicks "Forms Preview >" button.
+   * This opens a PDF in a NEW TAB (out of scope for current sprint — scaffold).
+   *
+   * Returns the new PDF tab Page reference for FormsPreviewPage.
+   */
+  async clickFormsPreviewButton(): Promise<Page> {
+    await expect(
+      this.formsPreviewButton,
+      '"Forms Preview >" button should be visible'
+    ).toBeVisible();
+
+    this.log('Clicking "Forms Preview >" — PDF will open in new tab');
+
+    const [pdfTab] = await Promise.all([
+      this.page.context().waitForEvent('page', { timeout: 30_000 }),
+      this.formsPreviewButton.click(),
+    ]);
+
+    await pdfTab.waitForLoadState('networkidle');
+    this.log(`Forms Preview PDF tab opened: ${pdfTab.url()}`);
+    return pdfTab;
+  }
+
+  async assertFormsPreviewButtonVisible(): Promise<void> {
+    await expect(this.formsPreviewButton, '"Forms Preview >" should be visible').toBeVisible();
+    this.log('✅ Forms Preview button visible');
+  }
+
+  // ── Quote Details Step 01 ──────────────────────────────────────────────────
+
+  async assertProductSelected(expected: string): Promise<void> {
+    const actual = await this.productDropdown.getSelectedValue();
+    expect(actual, `Product: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Product: ${actual}`);
+  }
+
+  async assertSubSegmentSelected(expected: string): Promise<void> {
+    const actual = await this.subSegmentDropdown.getSelectedValue();
+    expect(actual, `Sub-segment: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Sub-segment: ${actual}`);
+  }
+
+  // ── Save ───────────────────────────────────────────────────────────────────
+
+  async save(): Promise<void> {
+    await this.saveButton.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Save');
+  }
+
+  async cancel(): Promise<void> {
+    await this.cancelButton.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked Cancel');
+  }
+
+  // ── Step Tab Visibility ────────────────────────────────────────────────────
+
+  async assertAllStepTabsVisible(): Promise<void> {
+    await expect(this.quoteDetailsTab,  '01 Quote Details tab').toBeVisible();
+    await expect(this.formsTab,         '02 Forms tab').toBeVisible();
+    await expect(this.formsPreviewTab,  '03 Forms Preview tab').toBeVisible();
+    await expect(this.formSetOrderTab,  '04 Form Set Order tab').toBeVisible();
+    this.log('✅ All 4 step tabs visible');
+  }
+}
+src/pages/FormsPage.ts
+
+Rewritten based on actual screenshots. Forms is step 02 within the Quote. Form Sets are radio buttons. Mandatory/Optional forms are checkboxes. Clicking a form shows Form Fields on the right panel.
+
+typescript
+import { Page, Locator, expect }   from '@playwright/test';
+import { BasePage }                 from './base/BasePage';
+import {
+  FormConfig,
+  FormVerificationResult,
+  SubmissionDataMap,
+}                                   from '../coverage/types/coverage.types';
+import { FormEngine }               from '../coverage/engine/FormEngine';
+
+/**
+ * FormsPage
+ *
+ * Handles the Forms section (step 02) within the Quote Options page.
+ *
+ * ACTUAL PAGE STRUCTURE (from screenshots Image 5, 4, 3, 2):
+ *
+ *   Image 5 — Form Sets + Mandatory/Optional view:
+ *     "Form Sets" section:
+ *       ◉ Builder's Risk   ← radio button (only one selectable)
+ *
+ *     "Mandatory Forms" section:
+ *       ☑ BR 4000DEC 11 15 - BUILDER'S RISK DECLARATIONS QLTR         (disabled)
+ *       ☑ TER 9015PHN 02 15 - IMPORTANT NOTICE REGARDING TERRORISM...  (disabled)
+ *       ☑ COR 2067 10 21 - EDITION 10 2021 (US)                       (disabled)
+ *       ☑ GLH 1 09 14 - QUOTE LETTER HEADER                           (disabled)
+ *       ☑ BR 4010 11 15 - BUILDER'S RISK COVERAGE FORM                (disabled)
+ *       ☑ QLSNB 05 20 - QUOTE LETTER SALUTATION-NEW BUSINESS SURCHARGE (disabled)
+ *       ☑ IM 8035 12 20 - ELECTRONIC DATA EXCLUSION ENDORSEMENT        (disabled)
+ *
+ *     "Optional Forms - Builder's Risk" section:
+ *       [Select All] [Search...] [+ Add New]
+ *       ☐ IM 8004 01 10 - LOSS PAYABLE PROVISIONS ENDORSEMENT
+ *       ☐ GQL 1 11 04 - GENERIC QUOTE LETTER
+ *       ☐ IM 8007 01 10 - HURRICANE DEDUCTIBLE ENDORSEMENT
+ *       ... (more)
+ *
+ *     Bottom: [Cancel] [Save] [Forms Preview >]
+ *
+ *   Image 4, 3 — Form Fields view (after clicking a form):
+ *     "Form Fields" header on the section
+ *
+ *     Left panel: "Forms" list
+ *       ● BR 4000DEC 11 15 - BUILDER'S RISK DECLARATIONS QLTR   👁  (selected/highlighted)
+ *       ● QLH 1 09 14 - QUOTE LETTER HEADER                     👁
+ *       ... (all selected forms listed)
+ *
+ *     Right panel: "Form Fields" (fields for the selected form)
+ *       INSURED        [Type...]     POLICY NUMBER   [Type...]     EFFECTIVE DATE [MM/DD/YYYY]
+ *       PRODUCER       [Type...]     EXPIRATION DATE [MM/DD/YYYY]  PREMIUM*       [Type...]
+ *       LIMITS OF INS  [Type...]     CONST. ADDRESS  [Type...]     CONST. LIMIT*  [Type...]
+ *       DESCRIPTION    [Type...]     ANY ONE OCC*    [Type...]     SALVAGE*       [Type...]
+ *       DEDUCTIBLE*    [Type...]     COINSURANCE*    [Type...]     OPTIONAL FUNGI [Select ▼]
+ *
+ *     Bottom: [Cancel] [Save] [Forms Preview >]
+ *
+ * NAVIGATION:
+ *   This is accessed via QuotePage.clickFormsNavigationButton() or clickFormsTab()
+ *   Same page reference as QuotePage.
+ *
+ * SETUP REQUIRED: Replace all YOUR_*_SELECTOR placeholders.
+ */
+export class FormsPage extends BasePage {
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+  private readonly loadingSpinner:         Locator;
+  private readonly pageLoadedIndicator:    Locator;
+
+  // ── Form Sets Section ──────────────────────────────────────────────────────
+  // The "Form Sets" section containing radio buttons
+  private readonly formSetsSection:        Locator;
+
+  // ── Mandatory Forms Section ────────────────────────────────────────────────
+  // The "Mandatory Forms" section containing pre-checked, disabled checkboxes
+  private readonly mandatoryFormsSection:  Locator;
+
+  // ── Optional Forms Section ─────────────────────────────────────────────────
+  // The "Optional Forms" section containing unchecked checkboxes
+  private readonly optionalFormsSection:   Locator;
+  private readonly selectAllCheckbox:      Locator;   // "Select All" checkbox
+  private readonly optionalFormsSearch:    Locator;   // search input
+  private readonly addNewFormButton:       Locator;   // "+ Add New" button
+
+  // ── Form Fields Panel ──────────────────────────────────────────────────────
+  // The right panel that shows form fields when a form is clicked
+  // Visible in Images 2, 3, 4 — shows "Form Fields" header
+  private readonly formFieldsPanel:        Locator;
+
+  // The left "Forms" list that appears when Form Fields view is active
+  private readonly formListPanel:          Locator;
+
+  // Loading indicator for "Fetching the document for the form" (Image 2)
+  private readonly fetchingFormSpinner:    Locator;
+
+  // ── Bottom Buttons ─────────────────────────────────────────────────────────
+  private readonly cancelButton:           Locator;
+  private readonly saveButton:             Locator;
+  private readonly formsPreviewButton:     Locator;   // "Forms Preview >"
+
+  constructor(page: Page) {
+    super(page);
+
+    this.loadingSpinner      = page.locator('YOUR_FORMS_SPINNER_SELECTOR');
+    this.pageLoadedIndicator = page.locator('YOUR_FORMS_PAGE_LOADED_INDICATOR');
+
+    this.formSetsSection      = page.locator('YOUR_FORM_SETS_SECTION_SELECTOR');
+    this.mandatoryFormsSection = page.locator('YOUR_MANDATORY_FORMS_SECTION_SELECTOR');
+    this.optionalFormsSection  = page.locator('YOUR_OPTIONAL_FORMS_SECTION_SELECTOR');
+
+    this.selectAllCheckbox  = this.optionalFormsSection.locator('YOUR_SELECT_ALL_CHECKBOX');
+    this.optionalFormsSearch = page.locator('YOUR_OPTIONAL_FORMS_SEARCH_SELECTOR');
+    this.addNewFormButton   = page.locator('YOUR_ADD_NEW_FORM_BUTTON_SELECTOR');
+
+    this.formFieldsPanel     = page.locator('YOUR_FORM_FIELDS_PANEL_SELECTOR');
+    this.formListPanel       = page.locator('YOUR_FORM_LIST_PANEL_SELECTOR');
+    this.fetchingFormSpinner = page.locator('YOUR_FETCHING_FORM_SPINNER_SELECTOR');
+
+    this.cancelButton       = page.locator('YOUR_CANCEL_BUTTON_SELECTOR');
+    this.saveButton         = page.locator('YOUR_SAVE_BUTTON_SELECTOR');
+    this.formsPreviewButton = page.locator('YOUR_FORMS_PREVIEW_BUTTON_SELECTOR');
+  }
+
+  // ── Navigation ────────────────────────────────────────────────────────────
+
+  async navigate(): Promise<void> {
+    throw new Error(
+      'FormsPage is step 02 within the Quote.\n' +
+      'Navigate via: await quotePage.clickFormsNavigationButton();\n' +
+      '         or:  await quotePage.clickFormsTab();\n' +
+      'Then:         const formsPage = new FormsPage(page); // same page ref'
+    );
+  }
+
+  /**
+   * Waits for the Forms step to fully load.
+   * Should see Form Sets section with radio buttons.
+   */
+  async verifyPageLoaded(): Promise<void> {
+    try {
+      await this.loadingSpinner.waitFor({ state: 'hidden', timeout: 30_000 });
+    } catch {
+      this.log('Forms spinner not detected');
+    }
+    await this.page.waitForLoadState('networkidle');
+    await this.pageLoadedIndicator.waitFor({ state: 'visible', timeout: 15_000 });
+    this.log('Forms step loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Form Sets Section (Radio Buttons) ─────────────────────────────────────
+
+  /**
+   * Selects a Form Set by clicking its radio button.
+   * From Image 5: only "Builder's Risk" radio shown (only one at a time selectable).
+   *
+   * Example: await formsPage.selectFormSet("Builder's Risk");
+   */
+  async selectFormSet(formSetName: string): Promise<void> {
+    const radio = this.getFormSetRadio(formSetName);
+    await radio.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log(`Selected Form Set: ${formSetName}`);
+  }
+
+  async assertFormSetVisible(formSetName: string): Promise<void> {
+    await expect(
+      this.formSetsSection.locator(`text="${formSetName}"`),
+      `Form Set "${formSetName}" radio should be visible`
+    ).toBeVisible();
+  }
+
+  async assertFormSetSelected(formSetName: string): Promise<void> {
+    await expect(
+      this.getFormSetRadio(formSetName),
+      `Form Set "${formSetName}" radio should be selected`
+    ).toBeChecked();
+  }
+
+  async assertFormSetNotSelected(formSetName: string): Promise<void> {
+    await expect(
+      this.getFormSetRadio(formSetName),
+      `Form Set "${formSetName}" radio should NOT be selected`
+    ).not.toBeChecked();
+  }
+
+  // ── Mandatory Forms (pre-checked, disabled checkboxes) ────────────────────
+
+  /**
+   * Asserts mandatory form checkbox is pre-checked.
+   * From Image 5: all mandatory forms have checked and greyed checkboxes.
+   */
+  async assertMandatoryFormPreChecked(formName: string): Promise<void> {
+    await expect(
+      this.getMandatoryFormCheckbox(formName),
+      `Mandatory form "${formName}" should be pre-checked`
+    ).toBeChecked();
+    this.log(`✅ Mandatory pre-checked: ${formName}`);
+  }
+
+  /**
+   * Asserts mandatory form checkbox is disabled (cannot be unchecked).
+   */
+  async assertMandatoryFormCannotBeUnchecked(formName: string): Promise<void> {
+    await expect(
+      this.getMandatoryFormCheckbox(formName),
+      `Mandatory form "${formName}" checkbox should be disabled`
+    ).toBeDisabled();
+    this.log(`✅ Mandatory cannot uncheck: ${formName}`);
+  }
+
+  async assertMandatoryForm(formName: string): Promise<void> {
+    await this.assertMandatoryFormPreChecked(formName);
+    await this.assertMandatoryFormCannotBeUnchecked(formName);
+  }
+
+  async assertMandatoryFormsSectionVisible(): Promise<void> {
+    await expect(this.mandatoryFormsSection, 'Mandatory Forms section should be visible').toBeVisible();
+    this.log('✅ Mandatory Forms section visible');
+  }
+
+  // ── Optional Forms (unchecked, enabled checkboxes) ────────────────────────
+
+  /**
+   * Selects an optional form by checking its checkbox.
+   * From Image 5: Optional Forms - Builder's Risk section.
+   */
+  async selectOptionalForm(formName: string): Promise<void> {
+    const checkbox = this.getOptionalFormCheckbox(formName);
+    await expect(checkbox, `Optional form "${formName}" should be enabled`).toBeEnabled();
+    await checkbox.check();
+    this.log(`Selected optional form: ${formName}`);
+  }
+
+  async deselectOptionalForm(formName: string): Promise<void> {
+    const checkbox = this.getOptionalFormCheckbox(formName);
+    await expect(checkbox, `Optional form "${formName}" should be enabled`).toBeEnabled();
+    await checkbox.uncheck();
+    this.log(`Deselected optional form: ${formName}`);
+  }
+
+  async selectAllOptionalForms(): Promise<void> {
+    await expect(this.selectAllCheckbox, '"Select All" should be visible').toBeVisible();
+    await this.selectAllCheckbox.check();
+    this.log('Clicked "Select All" optional forms');
+  }
+
+  async assertOptionalFormIsChecked(formName: string): Promise<void> {
+    await expect(this.getOptionalFormCheckbox(formName)).toBeChecked();
+  }
+
+  async assertOptionalFormIsUnchecked(formName: string): Promise<void> {
+    await expect(this.getOptionalFormCheckbox(formName)).not.toBeChecked();
+  }
+
+  async assertOptionalFormIsEnabled(formName: string): Promise<void> {
+    await expect(this.getOptionalFormCheckbox(formName)).toBeEnabled();
+  }
+
+  async assertOptionalFormsSectionVisible(): Promise<void> {
+    await expect(this.optionalFormsSection, 'Optional Forms section should be visible').toBeVisible();
+    this.log('✅ Optional Forms section visible');
+  }
+
+  async searchOptionalForm(searchText: string): Promise<void> {
+    await this.optionalFormsSearch.fill(searchText);
+    await this.page.waitForTimeout(500);
+    this.log(`Searched optional forms: "${searchText}"`);
+  }
+
+  // ── Form Fields Panel (right panel — appears when form is clicked) ─────────
+
+  /**
+   * Clicks a form in the left Forms list to show its fields on the right panel.
+   * From Images 3, 4: clicking a form shows Form Fields panel on the right.
+   * Image 2 shows "Fetching the document for the form" loading spinner.
+   */
+  async clickFormToViewFields(formName: string): Promise<void> {
+    this.log(`Clicking form "${formName}" to view fields...`);
+
+    const formLink = this.formListPanel
+      .locator(`text="${formName}"`)
+      .or(this.page.locator(`[data-form-name="${formName}"]`))
+      .first();
+
+    await expect(formLink, `Form "${formName}" should be in the forms list`).toBeVisible();
+    await formLink.click();
+
+    // Wait for "Fetching the document for the form" spinner to appear then disappear
+    try {
+      await this.fetchingFormSpinner.waitFor({ state: 'visible', timeout: 3_000 });
+      await this.fetchingFormSpinner.waitFor({ state: 'hidden',  timeout: 30_000 });
+    } catch {
+      this.log('Fetch spinner not detected for this form');
+    }
+
+    await this.page.waitForLoadState('networkidle');
+
+    // Form Fields panel should now be visible on the right
+    await expect(
+      this.formFieldsPanel,
+      `Form Fields panel should appear after clicking "${formName}"`
+    ).toBeVisible();
+
+    this.log(`Form "${formName}" fields loaded`);
+  }
+
+  /**
+   * Asserts a specific form field is visible in the Form Fields panel.
+   * From Image 4: fields like INSURED, POLICY NUMBER, EFFECTIVE DATE etc.
+   */
+  async assertFormFieldVisible(fieldLabel: string): Promise<void> {
+    await expect(
+      this.formFieldsPanel.locator(`text="${fieldLabel}"`),
+      `Form field "${fieldLabel}" should be visible`
+    ).toBeVisible();
+    this.log(`✅ Field visible: ${fieldLabel}`);
+  }
+
+  /**
+   * Asserts a field in the Form Fields panel is disabled/read-only.
+   * Pre-populated fields are disabled per the requirements.
+   */
+  async assertFieldIsDisabled(selector: string, fieldLabel: string): Promise<void> {
+    const locator  = this.page.locator(selector);
+    const disabled = await locator.isDisabled();
+    const readOnly = await locator.getAttribute('readonly') !== null;
+    expect(
+      disabled || readOnly,
+      `Field "${fieldLabel}" (${selector}) should be disabled/read-only`
+    ).toBeTruthy();
+    this.log(`✅ Field disabled: ${fieldLabel}`);
+  }
+
+  async assertFieldIsEnabled(selector: string, fieldLabel: string): Promise<void> {
+    await expect(
+      this.page.locator(selector),
+      `Field "${fieldLabel}" should be enabled`
+    ).toBeEnabled();
+    this.log(`✅ Field enabled: ${fieldLabel}`);
+  }
+
+  async assertFieldValue(selector: string, expected: string, fieldLabel: string): Promise<void> {
+    await expect(
+      this.page.locator(selector),
+      `Field "${fieldLabel}" should have value "${expected}"`
+    ).toHaveValue(expected);
+  }
+
+  // ── Save ───────────────────────────────────────────────────────────────────
+
+  async save(): Promise<void> {
+    await this.saveButton.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Saved forms');
+  }
+
+  /**
+   * Clicks "Forms Preview >" button.
+   * Opens a PDF in a new tab (from Image 2, 3 context + user confirmation).
+   *
+   * Returns the new PDF tab for FormsPreviewPage.
+   * OUT OF SCOPE for current sprint — scaffold only.
+   */
+  async clickFormsPreviewButton(): Promise<Page> {
+    await expect(this.formsPreviewButton, '"Forms Preview >" should be visible').toBeVisible();
+
+    this.log('Clicking "Forms Preview >" — PDF will open in new tab');
+
+    const [pdfTab] = await Promise.all([
+      this.page.context().waitForEvent('page', { timeout: 30_000 }),
+      this.formsPreviewButton.click(),
+    ]);
+
+    await pdfTab.waitForLoadState('networkidle');
+    this.log(`Forms Preview PDF opened: ${pdfTab.url()}`);
+    return pdfTab;
+  }
+
+  async assertFormsPreviewButtonVisible(): Promise<void> {
+    await expect(this.formsPreviewButton, '"Forms Preview >" should be visible').toBeVisible();
+    this.log('✅ Forms Preview button visible');
+  }
+
+  // ── FormEngine Delegation ─────────────────────────────────────────────────
+
+  /**
+   * Processes all fields in a form:
+   *   - Verifies pre-populated fields against submissionData
+   *   - Fills editable fields from editableValues
+   *
+   * Must call clickFormToViewFields(formName) first to load the form fields.
+   */
+  async processForm(
+    form:            FormConfig,
+    submissionData:  SubmissionDataMap,
+    editableValues?: SubmissionDataMap,
+  ): Promise<FormVerificationResult> {
+    return FormEngine.processForm(this.page, form, submissionData, editableValues);
+  }
+
+  // ── Private Helpers ────────────────────────────────────────────────────────
+
+  private getFormSetRadio(formSetName: string): Locator {
+    return this.formSetsSection
+      .locator(`label:has-text("${formSetName}") input[type="radio"]`)
+      .or(this.formSetsSection.locator(`input[type="radio"][value="${formSetName}"]`))
+      .first();
+  }
+
+  private getMandatoryFormCheckbox(formName: string): Locator {
+    return this.mandatoryFormsSection
+      .locator(`label:has-text("${formName}") input[type="checkbox"]`)
+      .or(this.mandatoryFormsSection.locator(`input[type="checkbox"][value="${formName}"]`))
+      .first();
+  }
+
+  private getOptionalFormCheckbox(formName: string): Locator {
+    return this.optionalFormsSection
+      .locator(`label:has-text("${formName}") input[type="checkbox"]`)
+      .or(this.optionalFormsSection.locator(`input[type="checkbox"][value="${formName}"]`))
+      .first();
+  }
+}
+src/pages/FormsPreviewPage.ts — NEW
+
+Why: Forms Preview opens a PDF in a new tab (user confirmed + from screenshot context). This is a scaffold for the future sprint.
+
+typescript
+import { Page, Locator } from '@playwright/test';
+import { BasePage }       from './base/BasePage';
+
+/**
+ * FormsPreviewPage
+ *
+ * Handles the Forms Preview — a PDF that opens in a NEW TAB when
+ * "Forms Preview >" button is clicked.
+ *
+ * OUT OF SCOPE for current sprint.
+ * This is a scaffold — implement verification in the forms preview sprint.
+ *
+ * FUTURE SPRINT TASKS:
+ *   - Detect if PDF is embedded in iframe or opened as raw PDF
+ *   - Extract text from PDF for field value verification
+ *   - Assert specific form names appear in preview
+ *   - Assert field values match what was entered in Form Fields
+ */
+export class FormsPreviewPage extends BasePage {
+
+  private readonly pageLoadedIndicator: Locator;
+
+  constructor(page: Page) {
+    super(page);
+    // The PDF may render in an iframe, an object tag, or the browser's native PDF viewer
+    // Update this selector after observing the actual DOM
+    this.pageLoadedIndicator = page.locator('YOUR_PDF_PAGE_LOADED_INDICATOR');
+  }
+
+  async navigate(): Promise<void> {
+    throw new Error(
+      'FormsPreviewPage opens in a new tab via QuotePage.clickFormsPreviewButton()\n' +
+      'or FormsPage.clickFormsPreviewButton().'
+    );
+  }
+
+  /**
+   * Waits for the PDF tab to be ready.
+   * The PDF URL should contain 'pdf' or have a .pdf content type.
+   */
+  async verifyPageLoaded(): Promise<void> {
+    await this.page.waitForLoadState('networkidle');
+    this.log(`Forms Preview PDF loaded at: ${this.page.url()}`);
+  }
+
+  /**
+   * Returns the URL of the PDF tab.
+   * Can be used to verify it's a PDF URL.
+   */
+  getUrl(): string {
+    return this.page.url();
+  }
+
+  async assertIsPdfPage(): Promise<void> {
+    const url = this.page.url();
+    const isPdf = url.includes('.pdf') ||
+                  url.includes('pdf') ||
+                  (await this.page.content()).includes('pdf');
+    if (!isPdf) {
+      this.log(`Warning: Forms Preview URL may not be a PDF: ${url}`);
+    }
+    this.log(`✅ Forms Preview page URL: ${url}`);
+  }
+
+  // TODO (future sprint): implement PDF text extraction and field verification
+  // async extractPdfText(): Promise<string> { ... }
+  // async assertFieldValueInPdf(fieldName: string, value: string): Promise<void> { ... }
+  // async assertFormNameInPdf(formName: string): Promise<void> { ... }
+}
+SECTION 4 — Fixtures
+src/fixtures/index.ts
+typescript
+import {
+  test as base,
+  expect,
+  Browser,
+  BrowserContext,
+  Page,
+} from '@playwright/test';
+
+import { Role }                    from '../enums/role.enum';
+import { StorageStateManager }     from '../auth/StorageStateManager';
+import { AuthManager }             from '../auth/AuthManager';
+import { LoginPage }               from '../pages/LoginPage';
+import { DashboardPage }           from '../pages/DashboardPage';
+import { NewSubmissionModal }      from '../pages/NewSubmissionModal';
+import { SubmissionOverviewPage }  from '../pages/SubmissionOverviewPage';
+import { InsuredPolicyInfoPage }   from '../pages/InsuredPolicyInfoPage';
+import { BrokerInfoPage }          from '../pages/BrokerInfoPage';
+import { CoverageExposuresPage }   from '../pages/CoverageExposuresPage';
+import { QuotePage }               from '../pages/QuotePage';
+import { FormsPage }               from '../pages/FormsPage';
+import { FormsPreviewPage }        from '../pages/FormsPreviewPage';
+import { Logger }                  from '../utils/LoggerUtils';
+
+export type InsuranceFixtures = {
+  role:                  Role;
+  authenticatedPage:     Page;
+  loginPage:             LoginPage;
+  dashboardPage:         DashboardPage;
+  newSubmissionModal:    NewSubmissionModal;
+  submissionOverview:    SubmissionOverviewPage;
+  insuredPolicyPage:     InsuredPolicyInfoPage;
+  brokerInfoPage:        BrokerInfoPage;
+  coverageExposuresPage: CoverageExposuresPage;
+  quotePage:             QuotePage;
+  formsPage:             FormsPage;
+  formsPreviewPage:      FormsPreviewPage;
+};
+
+const DEFAULT_ROLE = Role.UW;
+
+export const test = base.extend<InsuranceFixtures>({
+
+  role: [DEFAULT_ROLE, { option: true }],
+
+  authenticatedPage: async ({ browser, role }, use) => {
+    await AuthManager.ensureSession(browser as Browser, role);
+
+    const context: BrowserContext = await (browser as Browser).newContext({
+      storageState: StorageStateManager.getFilePath(role),
+      viewport:     { width: 1920, height: 1080 },
+      recordVideo:  { dir: 'test-results/videos/' },
+    });
+
+    const page = await context.newPage();
+
+    page.on('response', async (response) => {
+      if (response.status() === 401 || response.status() === 403) {
+        Logger.warn(`Auth ${response.status()} for role ${role} — invalidating`);
+        StorageStateManager.invalidate(role);
+      }
+    });
+
+    await use(page);
+    await context.close();
+  },
+
+  loginPage: async ({ page }, use) => {
+    await use(new LoginPage(page));
+  },
+
+  dashboardPage: async ({ authenticatedPage }, use) => {
+    await use(new DashboardPage(authenticatedPage));
+  },
+
+  newSubmissionModal: async ({ authenticatedPage }, use) => {
+    await use(new NewSubmissionModal(authenticatedPage));
+  },
+
+  // For direct navigation to stored submissions
+  submissionOverview: async ({ authenticatedPage }, use) => {
+    await use(new SubmissionOverviewPage(authenticatedPage));
+  },
+
+  // For direct navigation tests using stored submissions
+  insuredPolicyPage: async ({ authenticatedPage }, use) => {
+    await use(new InsuredPolicyInfoPage(authenticatedPage));
+  },
+
+  // For direct navigation tests using stored submissions
+  brokerInfoPage: async ({ authenticatedPage }, use) => {
+    await use(new BrokerInfoPage(authenticatedPage));
+  },
+
+  // For Exposures & Quotes section interactions
+  coverageExposuresPage: async ({ authenticatedPage }, use) => {
+    await use(new CoverageExposuresPage(authenticatedPage));
+  },
+
+  // For Quote Options page interactions (same tab as coverage)
+  quotePage: async ({ authenticatedPage }, use) => {
+    await use(new QuotePage(authenticatedPage));
+  },
+
+  // For Forms step 02 interactions (same tab as quote)
+  formsPage: async ({ authenticatedPage }, use) => {
+    await use(new FormsPage(authenticatedPage));
+  },
+
+  // For Forms Preview PDF tab (future sprint)
+  formsPreviewPage: async ({ authenticatedPage }, use) => {
+    await use(new FormsPreviewPage(authenticatedPage));
+  },
+});
+
+export { expect };
+SECTION 5 — Test Specs
+tests/submission/new-submission.spec.ts
+
+What changed: Store call now saves displayId, submissionUrl, metrixSubmissionId.
+
+typescript
+import { test, expect }           from '../../src/fixtures/index';
+import { Tags }                   from '../../src/constants/test-tags.constants';
+import { Role }                   from '../../src/enums/role.enum';
+import { SubmissionFactory }      from '../../src/data/factories/SubmissionFactory';
+import { SubmissionManager }      from '../../src/data/managers/SubmissionManager';
+import { SubmissionOverviewPage } from '../../src/pages/SubmissionOverviewPage';
+import { UrlHelper }              from '../../src/helpers/UrlHelper';
+import { DateHelper }             from '../../src/helpers/DateHelper';
+
+test.use({ role: Role.UW });
+
+test.describe('New Submission — Creation and Overview Validation', () => {
+
+  test.beforeEach(async ({ dashboardPage }) => {
+    await dashboardPage.navigate();
+  });
+
+  test(
+    `${Tags.SMOKE} ${Tags.SUBMISSION} Create submission — new tab opens and validates`,
+    async ({ dashboardPage, newSubmissionModal, authenticatedPage }) => {
+
+      const data = SubmissionFactory.default();
+
+      await dashboardPage.clickNewSubmission();
+      await newSubmissionModal.verifyPageLoaded();
+
+      const newTab = await newSubmissionModal.createSubmission(
+        data,
+        authenticatedPage.context(),
+      );
+
+      const url                = newTab.url();
+      const metrixSubmissionId = UrlHelper.extractMetrixSubmissionId(url);
+      const displayId          = UrlHelper.extractDisplayId(url);
+
+      console.log(`New tab URL:            ${url}`);
+      console.log(`metrixSubmissionId:     ${metrixSubmissionId}`);
+      console.log(`displayId:              ${displayId}`);
+
+      expect(
+        metrixSubmissionId,
+        `metrixSubmissionId not extracted from URL: ${url}`
+      ).not.toBe('');
+
+      expect(
+        displayId,
+        `displayId not extracted from URL: ${url}`
+      ).not.toBe('');
+
+      expect(UrlHelper.isSubmissionPage(url)).toBeTruthy();
+
+      // Store both IDs + full URL for reliable navigation
+      SubmissionManager.store({
+        metrixSubmissionId,
+        displayId,
+        submissionUrl:    url,
+        quoteId:          '',   // filled after quote creation
+        submissionNumber: data.submissionNumber,
+        namedInsured:     data.insured.namedInsured,
+        createdAt:        Date.now(),
+        environment:      process.env.ENVIRONMENT ?? 'qa',
+      });
+
+      // Validate top bar overview fields on the new tab
+      const overviewPage = new SubmissionOverviewPage(newTab);
+      await overviewPage.verifyPageLoaded();
+      await overviewPage.assertTopBarMatchesSubmissionData(data);
+    }
+  );
+
+  test(
+    `${Tags.SANITY} ${Tags.SUBMISSION} Create button disabled on empty form`,
+    async ({ dashboardPage, newSubmissionModal }) => {
+      await dashboardPage.clickNewSubmission();
+      await newSubmissionModal.verifyPageLoaded();
+      await newSubmissionModal.assertCreateButtonDisabled();
+    }
+  );
+
+  test(
+    `${Tags.SANITY} ${Tags.SUBMISSION} Stage defaults to Open`,
+    async ({ dashboardPage, newSubmissionModal }) => {
+      await dashboardPage.clickNewSubmission();
+      await newSubmissionModal.verifyPageLoaded();
+      await newSubmissionModal.assertStageValue('Open');
+    }
+  );
+
+  test(
+    `${Tags.SANITY} ${Tags.SUBMISSION} Expiration auto-populates from inception`,
+    async ({ dashboardPage, newSubmissionModal }) => {
+      const today = DateHelper.today();
+      await dashboardPage.clickNewSubmission();
+      await newSubmissionModal.verifyPageLoaded();
+      await newSubmissionModal.assertExpirationAutoPopulated(today);
+    }
+  );
+
+  test(
+    `${Tags.REGRESSION} ${Tags.SUBMISSION} Dashboard shows new submission in table`,
+    async ({ dashboardPage, newSubmissionModal, authenticatedPage }) => {
+      const data = SubmissionFactory.default();
+      await dashboardPage.clickNewSubmission();
+      await newSubmissionModal.createSubmission(data, authenticatedPage.context());
+      await dashboardPage.assertSubmissionInTable(data.submissionNumber);
+    }
+  );
+
+  test.describe('Guest Role', () => {
+    test.use({ role: Role.GUEST });
+    test(`${Tags.REGRESSION} Guest cannot see New Submission button`, async ({ dashboardPage }) => {
+      await dashboardPage.navigate();
+      await dashboardPage.assertNewSubmissionButtonHidden();
+    });
+  });
+});
+tests/coverage/coverage-e2e.spec.ts
+
+Completely rewritten based on actual application flow from screenshots.
+
+typescript
+import { test, expect }              from '../../src/fixtures/index';
+import { Tags }                      from '../../src/constants/test-tags.constants';
+import { Role }                      from '../../src/enums/role.enum';
+import { SubmissionFactory }         from '../../src/data/factories/SubmissionFactory';
+import { SubmissionManager }         from '../../src/data/managers/SubmissionManager';
+import { FormRegistry }              from '../../src/coverage/registry/FormRegistry';
+import { SubmissionOverviewPage }    from '../../src/pages/SubmissionOverviewPage';
+import { CoverageExposuresPage, NewQuoteData } from '../../src/pages/CoverageExposuresPage';
+import { QuotePage }                 from '../../src/pages/QuotePage';
+import { FormsPage }                 from '../../src/pages/FormsPage';
+import { UrlHelper }                 from '../../src/helpers/UrlHelper';
+import { RandomHelper }              from '../../src/helpers/RandomHelper';
+import { DateHelper }                from '../../src/helpers/DateHelper';
+
+test.use({ role: Role.UW });
+
+/**
+ * coverage-e2e.spec.ts
+ *
+ * Runs ONCE before form-sets.spec.ts and form-fields.spec.ts.
+ *
+ * ACTUAL FLOW (confirmed from screenshots):
+ *
+ *   Step 1: Create Submission → new tab → store metrixSubmissionId + displayId
+ *   Step 2: Top bar validation (Named Insured, Submission No, Status = Open)
+ *   Step 3: General Information → Insured Info tab (auto-populated)
+ *   Step 4: Sidebar → Exposures & Quotes → "+ Add New" → New Quote panel
+ *   Step 5: Fill: QUOTE ID, EFFECTIVE DATE, PRODUCT, SUB-SEGMENT → Create
+ *   Step 6: Quote Options page loads (same tab) → fill General Quote Info
+ *   Step 7: Quote Details step → Product = Construction, Sub-segment set
+ *   Step 8: "Forms >" navigation → Forms step (02) loads
+ *   Step 9: Form Sets visible, Mandatory Forms pre-checked
+ *   Step 10: Store quoteId → FormsPage accessible for subsequent tests
+ */
+test.describe('Coverage & Exposures — End-to-End Setup', () => {
+
+  test(
+    `${Tags.SMOKE} ${Tags.COVERAGE} ${Tags.QUOTE} `
+    + 'Full flow: Submission → Exposures & Quotes → New Quote → Forms',
+
+    async ({ dashboardPage, newSubmissionModal, authenticatedPage }) => {
+
+      // ── Step 1: Load form config ─────────────────────────────────────────
+      const allFormSets = await FormRegistry.getAll();
+      expect(allFormSets.length, 'At least one Form Set must be in Excel').toBeGreaterThan(0);
+      const firstFormSet = allFormSets[0];
+
+      // ── Step 2: Create Submission ─────────────────────────────────────────
+      const data = SubmissionFactory.default();
+
+      await dashboardPage.navigate();
+      await dashboardPage.clickNewSubmission();
+
+      const submissionTab = await newSubmissionModal.createSubmission(
+        data,
+        authenticatedPage.context(),
+      );
+
+      const submissionUrl      = submissionTab.url();
+      const metrixSubmissionId = UrlHelper.extractMetrixSubmissionId(submissionUrl);
+      const displayId          = UrlHelper.extractDisplayId(submissionUrl);
+
+      console.log(`Submission URL:          ${submissionUrl}`);
+      console.log(`metrixSubmissionId:      ${metrixSubmissionId}`);
+      console.log(`displayId:              ${displayId}`);
+
+      expect(metrixSubmissionId, 'metrixSubmissionId must be extracted').not.toBe('');
+      expect(displayId,          'displayId must be extracted').not.toBe('');
+
+      // Store with empty quoteId initially
+      SubmissionManager.store({
+        metrixSubmissionId,
+        displayId,
+        submissionUrl,
+        quoteId:          '',
+        submissionNumber: data.submissionNumber,
+        namedInsured:     data.insured.namedInsured,
+        createdAt:        Date.now(),
+        environment:      process.env.ENVIRONMENT ?? 'qa',
+      });
+
+      // ── Step 3: Validate top bar overview ─────────────────────────────────
+      const overviewPage = new SubmissionOverviewPage(submissionTab);
+      await overviewPage.verifyPageLoaded();
+      await overviewPage.assertNamedInsured(data.insured.namedInsured);
+      await overviewPage.assertSubmissionNumber(data.submissionNumber);
+      await overviewPage.assertDefaultStatus();
+      await overviewPage.assertSidebarVisible();
+
+      // ── Step 4: Navigate to Exposures & Quotes via sidebar ────────────────
+      await overviewPage.clickExposuresAndQuotes();
+
+      const coveragePage = new CoverageExposuresPage(submissionTab);
+      await coveragePage.verifyPageLoaded();
+      await coveragePage.assertAddNewButtonVisible();
+
+      // ── Step 5: Create New Quote via "+ Add New" panel ────────────────────
+      // Quote ID is user-entered (e.g. 'QO-1') — seen in screenshots
+      const quoteId = `QO-${RandomHelper.numericString(1)}`;
+
+      const newQuoteData: NewQuoteData = {
+        quoteId,
+        effectiveDate: data.inceptionDate,
+        product:       firstFormSet.product,       // e.g. 'Construction'
+        subSegment:    firstFormSet.subSegment,     // e.g. 'Construction-Builder's Risk'
+        description:   'Automation test quote',
+      };
+
+      await coveragePage.createNewQuote(newQuoteData);
+
+      // ── Step 6: Quote Options page loads in same tab ──────────────────────
+      const quotePage = new QuotePage(submissionTab);
+      await quotePage.verifyPageLoaded();
+      await quotePage.assertAllStepTabsVisible();
+
+      // Verify Quote ID in General Quote Information
+      // (Note: quoteId field shows QO-2 as in screenshots)
+      console.log(`Quote ID entered: ${quoteId}`);
+
+      // ── Step 7: Fill HQ State (required in General Quote Information) ─────
+      // Image 15 shows HQ STATE is a required field
+      await quotePage.fillHqState('NY - New York');
+      await quotePage.save();
+
+      // ── Step 8: Navigate to Forms step (02) ──────────────────────────────
+      // Click "Forms >" button at bottom right (Image 9, 11 show "Forms Preview >" button)
+      await quotePage.clickFormsNavigationButton();
+
+      // ── Step 9: Forms step loaded — Form Sets visible ─────────────────────
+      const formsPage = new FormsPage(submissionTab);
+      await formsPage.verifyPageLoaded();
+      await formsPage.assertFormSetVisible(firstFormSet.formSetName);
+      await formsPage.assertMandatoryFormsSectionVisible();
+      await formsPage.assertOptionalFormsSectionVisible();
+
+      // ── Step 10: Store quoteId for subsequent tests ───────────────────────
+      SubmissionManager.updateQuoteId(metrixSubmissionId, quoteId);
+
+      console.log(`
+        ✅ Coverage E2E stored:
+           metrixSubmissionId: ${metrixSubmissionId}
+           displayId:          ${displayId}
+           quoteId:            ${quoteId}
+           submissionNumber:   ${data.submissionNumber}
+           formSetName:        ${firstFormSet.formSetName}
+      `);
+    }
+  );
+});
+tests/coverage/form-sets.spec.ts
+
+Rewritten with actual navigation: sidebar → Exposures & Quotes → click quote link → Forms tab → test Form Sets.
+
+typescript
+import { test, expect }             from '../../src/fixtures/index';
+import { Tags }                     from '../../src/constants/test-tags.constants';
+import { Role }                     from '../../src/enums/role.enum';
+import { FormRegistry }             from '../../src/coverage/registry/FormRegistry';
+import { FormSetConfig }            from '../../src/coverage/types/coverage.types';
+import { SubmissionManager }        from '../../src/data/managers/SubmissionManager';
+import { SubmissionOverviewPage }   from '../../src/pages/SubmissionOverviewPage';
+import { CoverageExposuresPage }    from '../../src/pages/CoverageExposuresPage';
+import { QuotePage }                from '../../src/pages/QuotePage';
+import { FormsPage }                from '../../src/pages/FormsPage';
+
+test.use({ role: Role.UW });
+
+test.describe('Forms — Form Sets and Forms Selection (Step 02)', () => {
+
+  let allFormSets: FormSetConfig[] = [];
+
+  test.beforeAll(async () => {
+    allFormSets = await FormRegistry.getAll();
+  });
+
+  /**
+   * Navigation helper — runs before every test.
+   * Navigates to the Forms step (02) within the quote.
+   *
+   * ACTUAL NAVIGATION SEQUENCE from screenshots:
+   *   Stored URL → Open submission → Sidebar: Exposures & Quotes
+   *     → Click quote ID link in table → Quote Options page
+   *       → Click "02 Forms" tab → Forms step
+   */
+  test.beforeEach(async ({ submissionOverview }) => {
+
+    // Guard 1: Submission must exist
+    const stored = SubmissionManager.getLatestWithQuote();
+
+    if (!stored) {
+      test.skip(
+        true,
+        'No stored submission with quoteId.\n' +
+        'Run: npx playwright test tests/coverage/coverage-e2e.spec.ts first.'
+      );
+      return;
+    }
+
+    // Guard 2: Form Sets must be configured
+    if (allFormSets.length === 0) {
+      test.skip(true, 'No form sets in forms-config.xlsx.');
+      return;
+    }
+
+    // Navigate to submission using stored URL (most reliable)
+    await submissionOverview.navigateByUrl(stored.submissionUrl);
+    await submissionOverview.verifyPageLoaded();
+
+    // Sidebar → Exposures & Quotes
+    await submissionOverview.clickExposuresAndQuotes();
+
+    const coveragePage = new CoverageExposuresPage(submissionOverview['page']);
+    await coveragePage.verifyPageLoaded();
+
+    // Click the existing quote ID link in the table (Q34 subsequent visits, Q38 latest)
+    await coveragePage.openQuoteByLink(stored.quoteId);
+
+    // Quote Options page loads in same tab
+    const quotePage = new QuotePage(submissionOverview['page']);
+    await quotePage.verifyPageLoaded();
+
+    // Click "02 Forms" tab to navigate to Forms step
+    await quotePage.clickFormsTab();
+
+    // Forms step is now active in the same page
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+  });
+
+  // ── Form Sets Visibility ──────────────────────────────────────────────────
+
+  test(`${Tags.SMOKE} ${Tags.FORM_SETS} All Form Sets visible as radio buttons`, async ({
+    submissionOverview,
+  }) => {
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    for (const fs of allFormSets) {
+      await formsPage.assertFormSetVisible(fs.formSetName);
+    }
+  });
+
+  // ── Form Set Radio Button ─────────────────────────────────────────────────
+
+  test(`${Tags.SANITY} ${Tags.FORM_SETS} Selecting Form Set radio loads its forms`, async ({
+    submissionOverview,
+  }) => {
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+    await formsPage.assertFormSetSelected(allFormSets[0].formSetName);
+  });
+
+  test(`${Tags.REGRESSION} ${Tags.FORM_SETS} Only one Form Set selectable at a time`, async ({
+    submissionOverview,
+  }) => {
+    if (allFormSets.length < 2) {
+      test.skip(true, 'Need 2+ Form Sets for radio exclusion test');
+      return;
+    }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+    await formsPage.assertFormSetSelected(allFormSets[0].formSetName);
+
+    await formsPage.selectFormSet(allFormSets[1].formSetName);
+    await formsPage.assertFormSetSelected(allFormSets[1].formSetName);
+    await formsPage.assertFormSetNotSelected(allFormSets[0].formSetName);
+  });
+
+  // ── Mandatory Forms ───────────────────────────────────────────────────────
+
+  test(`${Tags.SMOKE} ${Tags.MANDATORY_FORMS} Mandatory forms pre-checked and disabled`, async ({
+    submissionOverview,
+  }) => {
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+
+    for (const fs of allFormSets) {
+      await formsPage.selectFormSet(fs.formSetName);
+      for (const form of fs.forms.filter((f) => f.category === 'Mandatory')) {
+        await formsPage.assertMandatoryForm(form.formName);
+      }
+    }
+  });
+
+  test(`${Tags.REGRESSION} ${Tags.MANDATORY_FORMS} Mandatory Forms section is visible`, async ({
+    submissionOverview,
+  }) => {
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.assertMandatoryFormsSectionVisible();
+  });
+
+  // ── Optional Forms ────────────────────────────────────────────────────────
+
+  test(`${Tags.REGRESSION} ${Tags.OPTIONAL_FORMS} Optional forms unchecked by default`, async ({
+    submissionOverview,
+  }) => {
+    const optionalForms = allFormSets[0].forms.filter((f) => f.category === 'Optional');
+    if (!optionalForms.length) { test.skip(true, 'No optional forms'); return; }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+
+    const form = optionalForms[0];
+    await formsPage.assertOptionalFormIsUnchecked(form.formName);
+    await formsPage.assertOptionalFormIsEnabled(form.formName);
+  });
+
+  test(`${Tags.REGRESSION} ${Tags.OPTIONAL_FORMS} Optional forms can be selected`, async ({
+    submissionOverview,
+  }) => {
+    const optionalForms = allFormSets[0].forms.filter((f) => f.category === 'Optional');
+    if (!optionalForms.length) { test.skip(true, 'No optional forms'); return; }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+
+    const form = optionalForms[0];
+    await formsPage.selectOptionalForm(form.formName);
+    await formsPage.assertOptionalFormIsChecked(form.formName);
+  });
+
+  test(`${Tags.REGRESSION} ${Tags.OPTIONAL_FORMS} Optional form can be deselected`, async ({
+    submissionOverview,
+  }) => {
+    const optionalForms = allFormSets[0].forms.filter((f) => f.category === 'Optional');
+    if (!optionalForms.length) { test.skip(true, 'No optional forms'); return; }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+
+    const form = optionalForms[0];
+    await formsPage.selectOptionalForm(form.formName);
+    await formsPage.assertOptionalFormIsChecked(form.formName);
+    await formsPage.deselectOptionalForm(form.formName);
+    await formsPage.assertOptionalFormIsUnchecked(form.formName);
+  });
+
+  // ── Form Fields Panel ─────────────────────────────────────────────────────
+
+  test(`${Tags.SANITY} ${Tags.FORM_FIELDS} Clicking a form shows its fields on the right`, async ({
+    submissionOverview,
+  }) => {
+    const mandatoryForms = allFormSets[0].forms.filter((f) => f.category === 'Mandatory');
+    if (!mandatoryForms.length) { test.skip(true, 'No mandatory forms'); return; }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+
+    const form = mandatoryForms[0];
+    await formsPage.clickFormToViewFields(form.formName);
+
+    // Verify first configured field is visible in the Form Fields panel
+    if (form.fields.length > 0) {
+      await formsPage.assertFormFieldVisible(form.fields[0].fieldLabel);
+    }
+  });
+
+  test(`${Tags.REGRESSION} ${Tags.FORM_FIELDS} Pre-populated fields are disabled`, async ({
+    submissionOverview,
+  }) => {
+    const mandatoryForms = allFormSets[0].forms.filter((f) => f.category === 'Mandatory');
+    if (!mandatoryForms.length) { test.skip(true, 'No mandatory forms'); return; }
+
+    const form             = mandatoryForms[0];
+    const prePopulatedFlds = form.fields.filter((f) => !f.editable);
+    if (!prePopulatedFlds.length) { test.skip(true, 'No pre-populated fields'); return; }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+    await formsPage.clickFormToViewFields(form.formName);
+
+    for (const field of prePopulatedFlds) {
+      await formsPage.assertFieldIsDisabled(field.fieldSelector, field.fieldLabel);
+    }
+  });
+
+  test(`${Tags.REGRESSION} ${Tags.FORM_FIELDS} Editable fields are enabled`, async ({
+    submissionOverview,
+  }) => {
+    const mandatoryForms = allFormSets[0].forms.filter((f) => f.category === 'Mandatory');
+    if (!mandatoryForms.length) { test.skip(true, 'No mandatory forms'); return; }
+
+    const form         = mandatoryForms[0];
+    const editableFlds = form.fields.filter((f) => f.editable);
+    if (!editableFlds.length) { test.skip(true, 'No editable fields'); return; }
+
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.selectFormSet(allFormSets[0].formSetName);
+    await formsPage.clickFormToViewFields(form.formName);
+
+    for (const field of editableFlds) {
+      await formsPage.assertFieldIsEnabled(field.fieldSelector, field.fieldLabel);
+    }
+  });
+
+  // ── Forms Preview Button ──────────────────────────────────────────────────
+
+  test(`${Tags.REGRESSION} ${Tags.FORM_FIELDS} "Forms Preview >" button is visible`, async ({
+    submissionOverview,
+  }) => {
+    const formsPage = new FormsPage(submissionOverview['page']);
+    await formsPage.verifyPageLoaded();
+    await formsPage.assertFormsPreviewButtonVisible();
+  });
+});
+tests/coverage/form-fields.spec.ts
+
+Updated navigation sequence for actual flow.
+
+typescript
+import { test, expect }           from '../../src/fixtures/index';
+import { FormRegistry }           from '../../src/coverage/registry/FormRegistry';
+import { FormSetConfig, SubmissionDataMap } from '../../src/coverage/types/coverage.types';
+import { SubmissionManager }      from '../../src/data/managers/SubmissionManager';
+import { Tags }                   from '../../src/constants/test-tags.constants';
+import { Role }                   from '../../src/enums/role.enum';
+import { SubmissionOverviewPage } from '../../src/pages/SubmissionOverviewPage';
+import { CoverageExposuresPage }  from '../../src/pages/CoverageExposuresPage';
+import { QuotePage }              from '../../src/pages/QuotePage';
+import { FormsPage }              from '../../src/pages/FormsPage';
+
+test.use({ role: Role.UW });
+
+test.describe('Forms — Field Verification (Data-Driven from Excel)', () => {
+
+  let allFormSets: FormSetConfig[] = [];
+
+  test.beforeAll(async () => {
+    allFormSets = await FormRegistry.getAll();
+  });
+
+  test(`${Tags.SMOKE} ${Tags.FORM_FIELDS} Excel config loads with correct columns`, async () => {
+    expect(allFormSets.length, 'At least one Form Set must load').toBeGreaterThan(0);
+    const totalForms = allFormSets.reduce((n, fs) => n + fs.forms.length, 0);
+    expect(totalForms, 'At least one form must be configured').toBeGreaterThan(0);
+    console.log(
+      `Loaded: ${allFormSets.length} form sets | ${totalForms} forms | ` +
+      `columns: Product, Sub Segment, Formset, Form Number, Form Name, Form ID, ` +
+      `Form Order, Category, States Applicable, Field, Type, Required, Mapping`
+    );
+  });
+
+  test(
+    `${Tags.COVERAGE} ${Tags.FORM_FIELDS} Verify form fields across all Form Sets`,
+    async ({ submissionOverview }) => {
+
+      const stored = SubmissionManager.getLatestWithQuote();
+
+      if (!stored) {
+        test.skip(
+          true,
+          'No stored submission with quoteId.\n' +
+          'Run: npx playwright test tests/coverage/coverage-e2e.spec.ts first.'
+        );
+        return;
+      }
+
+      // Navigate using stored URL (most reliable)
+      await submissionOverview.navigateByUrl(stored.submissionUrl);
+      await submissionOverview.verifyPageLoaded();
+
+      // Sidebar → Exposures & Quotes → Open quote → Forms tab
+      await submissionOverview.clickExposuresAndQuotes();
+
+      const coveragePage = new CoverageExposuresPage(submissionOverview['page']);
+      await coveragePage.verifyPageLoaded();
+      await coveragePage.openQuoteByLink(stored.quoteId);
+
+      const quotePage = new QuotePage(submissionOverview['page']);
+      await quotePage.verifyPageLoaded();
+      await quotePage.clickFormsTab();
+
+      const formsPage = new FormsPage(submissionOverview['page']);
+      await formsPage.verifyPageLoaded();
+
+      /**
+       * submissionData map — Mapping key → actual value.
+       *
+       * Keys come from the "Mapping" column in the Excel file.
+       * Values come from what was entered in the application.
+       *
+       * EXAMPLES based on Image 4 fields (INSURED, POLICY NUMBER, EFFECTIVE DATE etc.):
+       */
+      const submissionData: SubmissionDataMap = {
+        // From submission creation:
+        'Named Insured':     stored.namedInsured,
+        'Submission Number': stored.submissionNumber,
+        'Insured':           stored.namedInsured,
+
+        // TODO: Add remaining Mapping values from your Excel file.
+        // Run tests once → check logs for warnings → add missing keys:
+        //
+        // 'Policy Number':          'POL-001234',
+        // 'Effective Date':         '09/08/2026',
+        // 'Expiration Date':        '09/08/2027',
+        // 'Premium':                '5000',
+        // 'Limits of Insurance':    '1000000',
+        // 'Deductible Amount':      '5000',
+        // 'Coinsurance':            '80',
+        // 'Under Hurricane Deductible': '10000',    ← from Mapping column in Excel
+        // 'Minimum Deductible':     '2500',
+      };
+
+      // Values for editable fields (no Mapping in Excel)
+      const editableValues: SubmissionDataMap = {
+        // TODO: Add values for editable fields (those with no Mapping)
+        // Key = "Field" label from Excel
+        //
+        // 'Premium for This Coverage Form ($)': '5000',
+        // 'Construction Project Site(s) - Address': '123 Main St',
+        // 'Description of Covered Property': 'Residential construction project',
+      };
+
+      // Process all Form Sets
+      for (const formSet of allFormSets) {
+        await formsPage.selectFormSet(formSet.formSetName);
+        await formsPage.assertFormSetSelected(formSet.formSetName);
+
+        for (const form of formSet.forms) {
+
+          // Mandatory: verify pre-checked + disabled
+          if (form.category === 'Mandatory') {
+            await formsPage.assertMandatoryForm(form.formName);
+          } else {
+            await formsPage.selectOptionalForm(form.formName);
+            await formsPage.assertOptionalFormIsChecked(form.formName);
+          }
+
+          // Skip if no fields in Excel
+          if (form.fields.length === 0) {
+            console.log(`Skipping "${form.formName}" — no fields in Excel`);
+            continue;
+          }
+
+          // Click form → view its fields in right panel
+          await formsPage.clickFormToViewFields(form.formName);
+
+          // Process fields (verify pre-populated, fill editable)
+          const result = await formsPage.processForm(form, submissionData, editableValues);
+
+          // Assert all verifications passed
+          const failures = result.fields
+            .filter((f) => !f.passed)
+            .map((f) =>
+              `  ┌ Field:    "${f.fieldLabel}"\n` +
+              `  │ Mapping:  "${f.mapping}"\n` +
+              `  │ Expected: "${f.expected}"\n` +
+              `  └ Actual:   "${f.actual}"`
+            );
+
+          expect(
+            failures,
+            `${failures.length} field(s) failed in "${form.formName}" [${formSet.formSetName}]:\n\n` +
+            failures.join('\n\n')
+          ).toHaveLength(0);
+        }
+      }
+    }
+  );
+});
+Complete File Inventory — What Changed and Why
+File	Status	Key Changes Based on Screenshots
+src/helpers/UrlHelper.ts	✅ Updated	extractMetrixSubmissionId reads from ?metrixSubmissionId= query param. Added extractDisplayId() for path segment. Added buildSubmissionUrl().
+src/types/submission.types.ts	✅ Updated	Added displayId, submissionUrl. quoteId = user-entered (e.g. 'QO-2').
+src/coverage/types/coverage.types.ts	✅ Updated	Added grid FieldType, GridConfig interface, formNumber, formOrder, formset to configs.
+src/coverage/loader/ExcelJSConfigLoader.ts	✅ Updated	Column names match actual Excel: Sub Segment, Formset, Form Number, Form ID, Form Order. Grid type parsing added.
+src/coverage/registry/FormRegistry.ts	✅ Minor update	All async. formSetName derived from Formset column (split on comma).
+src/data/managers/SubmissionManager.ts	✅ Updated	store() saves displayId, submissionUrl. updateQuoteId() updates existing entry.
+src/pages/SubmissionOverviewPage.ts	✅ Updated	navigate() uses buildSubmissionUrl(). Added navigateByUrl(). Sidebar navigation methods updated.
+src/pages/CoverageExposuresPage.ts	🔄 Rewritten	Now handles actual Exposures & Quotes page: quote table, + Add New panel, createNewQuote(), openQuoteByLink(). No more generateQuote() button.
+src/pages/QuotePage.ts	🔄 Rewritten	Same tab (not new tab). 4 step tabs. clickFormsNavigationButton(). clickFormsPreviewButton() opens PDF in new tab.
+src/pages/FormsPage.ts	🔄 Rewritten	Step 02 within Quote. formSetsSection, mandatoryFormsSection, optionalFormsSection. clickFormToViewFields() with fetching spinner wait.
+src/pages/FormsPreviewPage.ts	✅ NEW	Scaffold for PDF that opens in new tab from "Forms Preview >" button.
+src/fixtures/index.ts	✅ Updated	Added formsPreviewPage fixture. All page fixtures updated.
+tests/submission/new-submission.spec.ts	✅ Updated	Stores displayId + submissionUrl + metrixSubmissionId.
+tests/coverage/coverage-e2e.spec.ts	🔄 Rewritten	Uses sidebar navigation, "+ Add New" quote panel, same-tab Quote Options, Forms tab.
+tests/coverage/form-sets.spec.ts	🔄 Rewritten	Navigates: stored URL → Exposures & Quotes sidebar → click quote link → Forms tab.
+tests/coverage/form-fields.spec.ts	✅ Updated	Same navigation sequence. submissionData hints updated with actual field names from screenshots.
+Obsolete — Remove These
+bash
+# Remove old submissions.json (incompatible format — missing displayId, submissionUrl)
+rm storage-states/submissions.json
+
+# If @types/exceljs was installed — it does not exist, remove it
+npm uninstall @types/exceljs
+
+# Remove xlsx package if still present — HIGH severity vulnerability
+npm uninstall xlsx
+Run Order
+bash
+# 1. Auth setup (once)
+npx playwright test tests/auth/setup/ --project=chrome
+
+# 2. Create submission + validate + store metrixSubmissionId + displayId
+npx playwright test tests/submission/new-submission.spec.ts --project=chrome --headed
+
+# 3. Validate submission tabs (uses stored submission URL)
+npx playwright test tests/submission/ --project=chrome --headed
+
+# 4. Coverage E2E: create quote + navigate to Forms + store quoteId
+npx playwright test tests/coverage/coverage-e2e.spec.ts --project=chrome --headed
+
+# 5. Form Sets tests
+npx playwright test tests/coverage/form-sets.spec.ts --project=chrome --headed
+
+# 6. Form Fields (needs Excel at src/coverage/data/forms-config.xlsx)
+npx playwright test tests/coverage/form-fields.spec.ts --project=chrome --headed
