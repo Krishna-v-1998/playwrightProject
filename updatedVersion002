@@ -1,0 +1,1211 @@
+// ✅ New — wait for the CONTENT you actually want to see
+// This is like saying "don't do anything until the form is actually on screen"
+await this.page.waitForLoadState('networkidle'); // all network calls done
+await this.someFormElement.waitFor({ state: 'visible', timeout: 15_000 }); // element on screen
+
+------------------------------------------------------------------------------------------------------------
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage }               from './base/BasePage';
+import { SubmissionFormData }     from '../types/submission.types';
+import { Country }                from '../enums/country.enum';
+import { AssertionUtils }         from '../utils/AssertionUtils';
+
+/**
+ * InsuredInformationPage
+ *
+ * ── WHAT THIS IS ──────────────────────────────────────────────────────────────
+ * This handles the "Insured Information" tab inside General Information.
+ *
+ * Think of it as the first tab in a form where you fill in who is being insured:
+ *   - Company name (First Named Insured)
+ *   - Their address
+ *   - Some extra details like website and years with the company
+ *
+ * ── HOW TO GET HERE ───────────────────────────────────────────────────────────
+ * Step 1: Open a submission (it opens in a new tab)
+ * Step 2: Click "General Information" in the left sidebar
+ * Step 3: Click the "Insured Information" tab
+ * Step 4: Create this page object with the SAME page reference
+ *
+ *   const overview    = new SubmissionOverviewPage(submissionTab);
+ *   await overview.clickInsuredInformationTab();
+ *   const insuredPage = new InsuredInformationPage(submissionTab);
+ *
+ * ── WHAT YOU SEE ON SCREEN (from Image 19) ────────────────────────────────────
+ *   FIRST NAMED INSURED *    [AUTOMATION-Aurora Enterprises 424]    COUNTRY * [USA]
+ *   STREET ADDRESS *         [463 Main Street]
+ *   STREET ADDRESS 2         [Apt 4_Q]
+ *   CITY *                   [Houston]              STATE/PROVINCE * [NY - New York ▼]
+ *   ZIP/POSTAL CODE *        [00320]                PROJECT NAME    [Type...]
+ *   WEBSITE                  [Type...]
+ *   NUMBER OF CONSECUTIVE YEARS WITH ALLIANZ        [Type...]
+ *   YEAR BUSINESS STARTED    [YYYY]
+ *   [+ Add Named Insured]
+ *
+ * ── SETUP REQUIRED ────────────────────────────────────────────────────────────
+ * Replace all YOUR_*_SELECTOR with actual selectors from the application.
+ */
+export class InsuredInformationPage extends BasePage {
+
+  // ── Page Ready Indicator ───────────────────────────────────────────────────
+  // This is any element that is GUARANTEED to be on screen when this tab loads.
+  // We wait for this element to appear before doing anything else.
+  // Replace with the selector of the "FIRST NAMED INSURED" label or input.
+  private readonly firstNamedInsuredInput: Locator;
+
+  // ── All Form Fields ────────────────────────────────────────────────────────
+  // Each locator points to one specific field on this tab.
+  // Replace YOUR_*_SELECTOR with the actual selector from your app.
+  private readonly countryContainer:       Locator;  // Country dropdown container
+  private readonly countryInput:           Locator;  // input inside country dropdown
+  private readonly streetAddressInput:     Locator;
+  private readonly streetAddress2Input:    Locator;
+  private readonly cityInput:              Locator;
+  private readonly stateContainer:         Locator;  // State/Province dropdown container
+  private readonly stateInput:             Locator;  // input inside state dropdown
+  private readonly zipInput:               Locator;
+  private readonly projectNameInput:       Locator;
+  private readonly websiteInput:           Locator;
+  private readonly consecutiveYearsInput:  Locator;
+  private readonly yearBusinessStartedInput: Locator;
+  private readonly addNamedInsuredButton:  Locator;  // "+ Add Named Insured" button
+
+  // ── Validation Error Messages ──────────────────────────────────────────────
+  // These are the red error texts that appear when a required field is blank.
+  private readonly namedInsuredError: Locator;
+  private readonly streetAddressError: Locator;
+  private readonly cityError:          Locator;
+  private readonly zipError:           Locator;
+
+  constructor(page: Page) {
+    super(page);
+
+    // ── Replace all YOUR_*_SELECTOR with actual selectors ────────────────────
+    this.firstNamedInsuredInput    = page.locator('YOUR_FIRST_NAMED_INSURED_INPUT');
+    this.countryContainer          = page.locator('YOUR_COUNTRY_DROPDOWN_CONTAINER');
+    this.countryInput              = page.locator('YOUR_COUNTRY_DROPDOWN_INPUT');
+    this.streetAddressInput        = page.locator('YOUR_STREET_ADDRESS_INPUT');
+    this.streetAddress2Input       = page.locator('YOUR_STREET_ADDRESS_2_INPUT');
+    this.cityInput                 = page.locator('YOUR_CITY_INPUT');
+    this.stateContainer            = page.locator('YOUR_STATE_DROPDOWN_CONTAINER');
+    this.stateInput                = page.locator('YOUR_STATE_DROPDOWN_INPUT');
+    this.zipInput                  = page.locator('YOUR_ZIP_POSTAL_CODE_INPUT');
+    this.projectNameInput          = page.locator('YOUR_PROJECT_NAME_INPUT');
+    this.websiteInput              = page.locator('YOUR_WEBSITE_INPUT');
+    this.consecutiveYearsInput     = page.locator('YOUR_CONSECUTIVE_YEARS_INPUT');
+    this.yearBusinessStartedInput  = page.locator('YOUR_YEAR_BUSINESS_STARTED_INPUT');
+    this.addNamedInsuredButton     = page.locator('YOUR_ADD_NAMED_INSURED_BUTTON');
+
+    this.namedInsuredError  = page.locator('YOUR_NAMED_INSURED_ERROR_SELECTOR');
+    this.streetAddressError = page.locator('YOUR_STREET_ADDRESS_ERROR_SELECTOR');
+    this.cityError          = page.locator('YOUR_CITY_ERROR_SELECTOR');
+    this.zipError           = page.locator('YOUR_ZIP_ERROR_SELECTOR');
+  }
+
+  // ── Page Load Check ────────────────────────────────────────────────────────
+
+  /**
+   * Wait until this tab has fully loaded before doing anything.
+   *
+   * HOW IT WORKS (simple explanation):
+   *   1. waitForLoadState('networkidle') = browser finished all network calls
+   *      Think: website stopped downloading things in the background
+   *   2. firstNamedInsuredInput.waitFor('visible') = the main field appeared on screen
+   *      Think: the form fields are actually showing up, not just a blank page
+   *
+   * WHY NOT USE SPINNER:
+   *   Waiting for a spinner to DISAPPEAR is unreliable — the spinner might never
+   *   appear on a fast load, but the page might still not be ready.
+   *   Waiting for content to APPEAR is always reliable.
+   */
+  async verifyPageLoaded(): Promise<void> {
+    // Step 1: Wait for all background network calls to finish
+    await this.page.waitForLoadState('networkidle');
+
+    // Step 2: Wait for the first field to actually appear on screen
+    await this.firstNamedInsuredInput.waitFor({
+      state:   'visible',  // 'visible' means: on screen and not hidden
+      timeout: 15_000,     // give it up to 15 seconds
+    });
+
+    this.log('Insured Information tab loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Read Field Values ──────────────────────────────────────────────────────
+  // These methods READ what is currently in each field.
+  // Useful for verification — checking the auto-populated values are correct.
+
+  async getNamedInsured():   Promise<string> { return this.firstNamedInsuredInput.inputValue(); }
+  async getStreetAddress():  Promise<string> { return this.streetAddressInput.inputValue(); }
+  async getStreetAddress2(): Promise<string> { return this.streetAddress2Input.inputValue(); }
+  async getCity():           Promise<string> { return this.cityInput.inputValue(); }
+  async getZip():            Promise<string> { return this.zipInput.inputValue(); }
+
+  // ── Fill / Update Field Values ─────────────────────────────────────────────
+  // These methods TYPE into the fields.
+  // The .press('Tab') at the end moves focus away — this triggers auto-save.
+
+  async fillNamedInsured(name: string): Promise<void> {
+    await this.firstNamedInsuredInput.clear();
+    await this.firstNamedInsuredInput.fill(name);
+    await this.firstNamedInsuredInput.press('Tab'); // Tab = move focus = triggers save
+    this.log(`Filled Named Insured: ${name}`);
+  }
+
+  async selectCountry(country: string): Promise<void> {
+    // Click the country dropdown to open it, then click the option
+    await this.countryContainer.click();
+    await this.page.waitForTimeout(400); // tiny wait for dropdown to open
+    await this.page.locator(`[role="option"]:has-text("${country}")`).first().click();
+    // After selecting country, the State/Province list changes to match
+    await this.page.waitForLoadState('networkidle');
+    this.log(`Selected Country: ${country}`);
+  }
+
+  async fillStreetAddress(address: string): Promise<void> {
+    await this.streetAddressInput.clear();
+    await this.streetAddressInput.fill(address);
+    await this.streetAddressInput.press('Tab');
+  }
+
+  async fillStreetAddress2(address: string): Promise<void> {
+    await this.streetAddress2Input.clear();
+    await this.streetAddress2Input.fill(address);
+    await this.streetAddress2Input.press('Tab');
+  }
+
+  async fillCity(city: string): Promise<void> {
+    await this.cityInput.clear();
+    await this.cityInput.fill(city);
+    await this.cityInput.press('Tab');
+  }
+
+  async selectState(state: string): Promise<void> {
+    // State is a dropdown (not free text) — must click and select
+    await this.stateContainer.click();
+    await this.page.waitForTimeout(400);
+    await this.page.locator(`[role="option"]:has-text("${state}")`).first().click();
+    this.log(`Selected State: ${state}`);
+  }
+
+  async fillZip(zip: string): Promise<void> {
+    await this.zipInput.clear();
+    await this.zipInput.fill(zip);
+    await this.zipInput.press('Tab');
+  }
+
+  async fillProjectName(name: string): Promise<void> {
+    await this.projectNameInput.clear();
+    await this.projectNameInput.fill(name);
+    await this.projectNameInput.press('Tab');
+  }
+
+  async fillWebsite(url: string): Promise<void> {
+    await this.websiteInput.clear();
+    await this.websiteInput.fill(url);
+    await this.websiteInput.press('Tab');
+  }
+
+  async fillConsecutiveYears(years: string): Promise<void> {
+    await this.consecutiveYearsInput.clear();
+    await this.consecutiveYearsInput.fill(years);
+    await this.consecutiveYearsInput.press('Tab');
+  }
+
+  async fillYearBusinessStarted(year: string): Promise<void> {
+    await this.yearBusinessStartedInput.clear();
+    await this.yearBusinessStartedInput.fill(year);
+    await this.yearBusinessStartedInput.press('Tab');
+  }
+
+  async clickAddNamedInsured(): Promise<void> {
+    await this.addNamedInsuredButton.click();
+    await this.page.waitForLoadState('networkidle');
+    this.log('Clicked + Add Named Insured');
+  }
+
+  // ── Assert Field Values ────────────────────────────────────────────────────
+  // These check that a field shows the EXPECTED value.
+  // If it doesn't match, the test FAILS with a clear error message.
+
+  async assertNamedInsured(expected: string): Promise<void> {
+    // toHaveValue checks the INPUT field value
+    await expect(
+      this.firstNamedInsuredInput,
+      `Named Insured should be "${expected}"`
+    ).toHaveValue(expected);
+    this.log(`✅ Named Insured: ${expected}`);
+  }
+
+  async assertStreetAddress(expected: string): Promise<void> {
+    await expect(this.streetAddressInput).toHaveValue(expected);
+    this.log(`✅ Street Address: ${expected}`);
+  }
+
+  async assertStreetAddress2(expected: string): Promise<void> {
+    await expect(this.streetAddress2Input).toHaveValue(expected);
+    this.log(`✅ Street Address 2: ${expected}`);
+  }
+
+  async assertCity(expected: string): Promise<void> {
+    await expect(this.cityInput).toHaveValue(expected);
+    this.log(`✅ City: ${expected}`);
+  }
+
+  async assertZip(expected: string): Promise<void> {
+    await expect(this.zipInput).toHaveValue(expected);
+    this.log(`✅ Zip: ${expected}`);
+  }
+
+  async assertCountry(expected: string): Promise<void> {
+    const actual = (await this.countryInput.inputValue()).trim();
+    expect(actual, `Country: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Country: ${expected}`);
+  }
+
+  async assertDefaultCountry(): Promise<void> {
+    await this.assertCountry('USA');
+  }
+
+  async assertState(expected: string): Promise<void> {
+    const actual = (await this.stateInput.inputValue()).trim();
+    expect(actual, `State: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ State: ${expected}`);
+  }
+
+  // ── Validation Error Assertions ────────────────────────────────────────────
+
+  async assertNamedInsuredRequired(): Promise<void> {
+    await expect(
+      this.namedInsuredError,
+      'Named Insured error should be visible'
+    ).toBeVisible();
+    this.log('✅ Named Insured required error shown');
+  }
+
+  async assertNoNamedInsuredError(): Promise<void> {
+    await expect(this.namedInsuredError).toBeHidden();
+  }
+
+  // ── "+ Add Named Insured" Button ───────────────────────────────────────────
+
+  async assertAddNamedInsuredButtonVisible(): Promise<void> {
+    await expect(
+      this.addNamedInsuredButton,
+      '"+ Add Named Insured" button should be visible'
+    ).toBeVisible();
+    this.log('✅ Add Named Insured button visible');
+  }
+
+  // ── Combined: Verify everything was auto-populated from submission ─────────
+
+  /**
+   * ONE METHOD TO CHECK EVERYTHING.
+   *
+   * When a submission is created, all these fields are auto-filled
+   * from what the user entered in the New Submission Modal.
+   *
+   * This method checks ALL fields at once so tests don't need to
+   * call 10 separate assert methods.
+   *
+   * HOW TO USE:
+   *   await insuredPage.assertAutoPopulatedFromSubmission(data);
+   */
+  async assertAutoPopulatedFromSubmission(data: SubmissionFormData): Promise<void> {
+    this.log('--- Verifying Insured Information auto-population ---');
+
+    // Company name
+    await this.assertNamedInsured(data.insured.namedInsured);
+
+    // Country (defaults to USA)
+    await this.assertCountry(data.insured.country);
+
+    // Address
+    await this.assertStreetAddress(data.insured.streetAddress);
+    if (data.insured.streetAddress2) {
+      await this.assertStreetAddress2(data.insured.streetAddress2);
+    }
+
+    // City, State, Zip
+    await this.assertCity(data.insured.city);
+    await this.assertState(data.insured.state);
+    await this.assertZip(data.insured.zip);
+
+    // Button present
+    await this.assertAddNamedInsuredButtonVisible();
+
+    this.log('--- Insured Information verified ✅ ---');
+  }
+}
+-----------------------------------------------------------------------------------------------------------------
+
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage }               from './base/BasePage';
+import { SubmissionFormData }     from '../types/submission.types';
+import { DateHelper }             from '../helpers/DateHelper';
+import { AssertionUtils }         from '../utils/AssertionUtils';
+
+/**
+ * PolicyInformationPage
+ *
+ * ── WHAT THIS IS ──────────────────────────────────────────────────────────────
+ * This handles the "Policy Information" tab inside General Information.
+ *
+ * Think of it as the second tab where you see/edit the policy-specific details:
+ *   - What policy number has been assigned
+ *   - When the policy starts and ends
+ *   - What products were selected
+ *   - What sub-segments apply
+ *   - The underwriter's notes about the policy
+ *
+ * ── HOW TO GET HERE ───────────────────────────────────────────────────────────
+ *   const overview    = new SubmissionOverviewPage(submissionTab);
+ *   await overview.clickPolicyInformationTab();
+ *   const policyPage  = new PolicyInformationPage(submissionTab);
+ *
+ * ── WHAT YOU SEE ON SCREEN ────────────────────────────────────────────────────
+ *   POLICY NUMBER              [max 14 alphanumeric chars]
+ *   SUBMISSION NUMBER          [auto-filled, e.g. 4061442121]
+ *   INCEPTION DATE             [09/08/2026]
+ *   EXPIRATION DATE            [09/08/2027]  ← auto-calculated (1 year)
+ *   REQUESTED DATE             [MM/DD/YYYY]  ← optional
+ *   PRODUCT                    [multi-select dropdown]
+ *   POLICY TYPE                [New / Renewal]  ← read-only on this page
+ *   SUB SEGMENT                [multi-select, 4 options]
+ *   UNDERWRITING RATIONALE     [rich text editor]
+ *   PY PRICING SUMMARY button  [only appears if Policy Type = Renewal]
+ *
+ * ── SETUP REQUIRED ────────────────────────────────────────────────────────────
+ * Replace all YOUR_*_SELECTOR with actual selectors.
+ */
+export class PolicyInformationPage extends BasePage {
+
+  // ── Page Ready Indicator ───────────────────────────────────────────────────
+  // We wait for the Submission Number field to appear — it's always visible
+  // and always auto-filled, so it confirms the tab has loaded properly.
+  private readonly submissionNumberInput:    Locator;
+
+  // ── Policy Number ──────────────────────────────────────────────────────────
+  // Business Rule: max 14 alphanumeric characters
+  private readonly policyNumberInput:        Locator;
+  private readonly policyNumberError:        Locator;
+
+  // ── Date Fields ────────────────────────────────────────────────────────────
+  private readonly inceptionDateInput:       Locator;
+  private readonly expirationDateInput:      Locator;
+  private readonly requestedDateInput:       Locator;
+
+  // ── Product Multi-Select ───────────────────────────────────────────────────
+  // Products is a multi-select — you can pick more than one
+  private readonly productContainer:         Locator;
+
+  // ── Policy Type ────────────────────────────────────────────────────────────
+  // Read-only display — shows 'New' or 'Renewal'
+  private readonly policyTypeDisplay:        Locator;
+
+  // ── Sub Segment Multi-Select ───────────────────────────────────────────────
+  // Sub Segment has 4 options — user can select multiple
+  private readonly subSegmentContainer:      Locator;
+
+  // ── Underwriting Rationale ─────────────────────────────────────────────────
+  // Rich text editor — like a small word processor inside the form
+  // Users type notes about why they're underwriting this policy
+  private readonly uwRationaleEditor:        Locator;
+
+  // ── Renewal-Only Button ────────────────────────────────────────────────────
+  // Only visible when Policy Type = Renewal
+  private readonly pyPricingSummaryButton:   Locator;
+
+  constructor(page: Page) {
+    super(page);
+
+    this.submissionNumberInput  = page.locator('YOUR_POLICY_SUBMISSION_NUMBER_INPUT');
+    this.policyNumberInput      = page.locator('YOUR_POLICY_NUMBER_INPUT');
+    this.policyNumberError      = page.locator('YOUR_POLICY_NUMBER_ERROR_SELECTOR');
+    this.inceptionDateInput     = page.locator('YOUR_POLICY_INCEPTION_DATE_INPUT');
+    this.expirationDateInput    = page.locator('YOUR_POLICY_EXPIRATION_DATE_INPUT');
+    this.requestedDateInput     = page.locator('YOUR_POLICY_REQUESTED_DATE_INPUT');
+    this.productContainer       = page.locator('YOUR_POLICY_PRODUCT_CONTAINER');
+    this.policyTypeDisplay      = page.locator('YOUR_POLICY_TYPE_DISPLAY_SELECTOR');
+    this.subSegmentContainer    = page.locator('YOUR_POLICY_SUB_SEGMENT_CONTAINER');
+    this.uwRationaleEditor      = page.locator('YOUR_UW_RATIONALE_EDITOR_SELECTOR');
+    this.pyPricingSummaryButton = page.locator('YOUR_PY_PRICING_SUMMARY_BTN_SELECTOR');
+  }
+
+  // ── Page Load Check ────────────────────────────────────────────────────────
+
+  /**
+   * HOW THIS WORKS (simple explanation):
+   *   1. waitForLoadState('networkidle') — browser stops all background calls
+   *      Like: the page has stopped "thinking" in the background
+   *   2. submissionNumberInput.waitFor('visible') — the form field appeared
+   *      Like: you can now see the Submission Number field on screen
+   *
+   * We use the Submission Number field because it's:
+   *   - Always present on this tab
+   *   - Always auto-filled (so we know data loaded)
+   *   - Shows up early in the page load
+   */
+  async verifyPageLoaded(): Promise<void> {
+    await this.page.waitForLoadState('networkidle');
+
+    await this.submissionNumberInput.waitFor({
+      state:   'visible',
+      timeout: 15_000,
+    });
+
+    this.log('Policy Information tab loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Read Field Values ──────────────────────────────────────────────────────
+
+  async getSubmissionNumber(): Promise<string> {
+    return (await this.submissionNumberInput.inputValue()).trim();
+  }
+
+  async getPolicyNumber(): Promise<string> {
+    return (await this.policyNumberInput.inputValue()).trim();
+  }
+
+  async getInceptionDate(): Promise<string> {
+    return (await this.inceptionDateInput.inputValue()).trim();
+  }
+
+  async getExpirationDate(): Promise<string> {
+    return (await this.expirationDateInput.inputValue()).trim();
+  }
+
+  async getPolicyType(): Promise<string> {
+    return (await this.policyTypeDisplay.innerText()).trim();
+  }
+
+  // ── Fill / Update Field Values ─────────────────────────────────────────────
+
+  /**
+   * Fills the Policy Number field.
+   *
+   * BUSINESS RULE: Maximum 14 alphanumeric characters.
+   * If you type more than 14, the application shows an error.
+   *
+   * EXAMPLE:
+   *   await policyPage.fillPolicyNumber('POL-2026-001');  ← valid (12 chars)
+   *   await policyPage.fillPolicyNumber('ABCD1234ABCD123'); ← invalid (15 chars → shows error)
+   */
+  async fillPolicyNumber(value: string): Promise<void> {
+    await this.policyNumberInput.clear();
+    await this.policyNumberInput.fill(value);
+    await this.policyNumberInput.press('Tab'); // triggers validation
+    this.log(`Filled Policy Number: ${value}`);
+  }
+
+  async fillInceptionDate(date: string): Promise<void> {
+    // Clear and type the date, then press Tab to trigger
+    // the Expiration Date auto-calculation (1 year after inception)
+    await this.inceptionDateInput.click();
+    await this.inceptionDateInput.fill(date);
+    await this.inceptionDateInput.press('Tab');
+    this.log(`Filled Inception Date: ${date}`);
+  }
+
+  async fillExpirationDate(date: string): Promise<void> {
+    await this.expirationDateInput.click();
+    await this.expirationDateInput.fill(date);
+    await this.expirationDateInput.press('Tab');
+    this.log(`Filled Expiration Date: ${date}`);
+  }
+
+  async fillRequestedDate(date: string): Promise<void> {
+    await this.requestedDateInput.click();
+    await this.requestedDateInput.fill(date);
+    await this.requestedDateInput.press('Tab');
+  }
+
+  async fillUnderwritingRationale(text: string): Promise<void> {
+    // Rich text editors don't use .fill() — you click inside then type
+    await this.uwRationaleEditor.click();
+    await this.uwRationaleEditor.fill(text);
+    this.log(`Filled UW Rationale (${text.length} chars)`);
+  }
+
+  async clearUnderwritingRationale(): Promise<void> {
+    await this.uwRationaleEditor.click();
+    // Select All + Delete = clear all text
+    await this.uwRationaleEditor.press('Control+a');
+    await this.uwRationaleEditor.press('Delete');
+    this.log('Cleared UW Rationale');
+  }
+
+  // ── Assert Field Values ────────────────────────────────────────────────────
+
+  async assertSubmissionNumber(expected: string): Promise<void> {
+    await expect(
+      this.submissionNumberInput,
+      `Submission Number should be "${expected}"`
+    ).toHaveValue(expected);
+    this.log(`✅ Submission Number: ${expected}`);
+  }
+
+  async assertPolicyNumber(expected: string): Promise<void> {
+    await expect(
+      this.policyNumberInput,
+      `Policy Number should be "${expected}"`
+    ).toHaveValue(expected);
+    this.log(`✅ Policy Number: ${expected}`);
+  }
+
+  async assertInceptionDate(expected: string): Promise<void> {
+    await expect(
+      this.inceptionDateInput,
+      `Inception Date should be "${expected}"`
+    ).toHaveValue(expected);
+    this.log(`✅ Inception Date: ${expected}`);
+  }
+
+  async assertExpirationDate(expected: string): Promise<void> {
+    await expect(
+      this.expirationDateInput,
+      `Expiration Date should be "${expected}"`
+    ).toHaveValue(expected);
+    this.log(`✅ Expiration Date: ${expected}`);
+  }
+
+  async assertExpirationAutoCalculated(inceptionDate: string): Promise<void> {
+    // Business Rule: Expiration = Inception + 1 year
+    const expectedExpiry = DateHelper.calculateExpirationDate(inceptionDate);
+    await this.assertExpirationDate(expectedExpiry);
+    this.log(`✅ Expiration auto-calculated: ${expectedExpiry}`);
+  }
+
+  async assertPolicyType(expected: 'New' | 'Renewal'): Promise<void> {
+    await expect(
+      this.policyTypeDisplay,
+      `Policy Type should be "${expected}"`
+    ).toContainText(expected);
+    this.log(`✅ Policy Type: ${expected}`);
+  }
+
+  // ── Policy Number Validation ───────────────────────────────────────────────
+
+  async assertPolicyNumberAccepts14Chars(): Promise<void> {
+    const exactly14 = 'ABCD1234ABCD12'; // 14 characters — valid
+    await this.fillPolicyNumber(exactly14);
+    await expect(
+      this.policyNumberError,
+      'No error should appear for 14 characters'
+    ).toBeHidden();
+    this.log('✅ Policy Number accepts exactly 14 chars');
+  }
+
+  async assertPolicyNumberRejectsOver14Chars(): Promise<void> {
+    const over14 = 'ABCD1234ABCD123'; // 15 characters — too long
+    await this.fillPolicyNumber(over14);
+    await expect(
+      this.policyNumberError,
+      'Error should appear for more than 14 characters'
+    ).toBeVisible();
+    this.log('✅ Policy Number rejects 15+ chars');
+  }
+
+  // ── Renewal Policy Specific ────────────────────────────────────────────────
+
+  /**
+   * Business Rule: If Policy Type = Renewal, the PY Pricing Summary button appears.
+   * This button is used to view pricing from the previous year.
+   */
+  async assertPYPricingSummaryVisible(): Promise<void> {
+    await expect(
+      this.pyPricingSummaryButton,
+      'PY Pricing Summary button should be visible for Renewal'
+    ).toBeVisible();
+    this.log('✅ PY Pricing Summary button visible (Renewal)');
+  }
+
+  async assertPYPricingSummaryHidden(): Promise<void> {
+    await expect(
+      this.pyPricingSummaryButton,
+      'PY Pricing Summary button should NOT be visible for New policy'
+    ).toBeHidden();
+    this.log('✅ PY Pricing Summary button hidden (New policy)');
+  }
+
+  // ── Combined: Verify auto-population from submission ──────────────────────
+
+  async assertAutoPopulatedFromSubmission(data: SubmissionFormData): Promise<void> {
+    this.log('--- Verifying Policy Information auto-population ---');
+
+    await this.assertSubmissionNumber(data.submissionNumber);
+    await this.assertInceptionDate(data.inceptionDate);
+
+    // Expiration date: use provided value or auto-calculate from inception
+    const expectedExpiry = data.expirationDate
+      ?? DateHelper.calculateExpirationDate(data.inceptionDate);
+    await this.assertExpirationDate(expectedExpiry);
+
+    await this.assertPolicyType(data.policyType);
+
+    // Check Renewal-specific button
+    if (data.policyType === 'Renewal') {
+      await this.assertPYPricingSummaryVisible();
+    } else {
+      await this.assertPYPricingSummaryHidden();
+    }
+
+    this.log('--- Policy Information verified ✅ ---');
+  }
+}
+-----------------------------------------------------------------------------------------------------
+
+import { Page, Locator, expect } from '@playwright/test';
+import { BasePage }               from './base/BasePage';
+import { SubmissionFormData }     from '../types/submission.types';
+import { AssertionUtils }         from '../utils/AssertionUtils';
+
+/**
+ * BrokerInformationPage
+ *
+ * ── WHAT THIS IS ──────────────────────────────────────────────────────────────
+ * This handles the "Broker Information" tab inside General Information.
+ *
+ * Think of it as the third tab where you see who the broker is:
+ *   - The broker company name
+ *   - Their address
+ *   - Their email and commission percentage
+ *   - Notes about the broker (limited to 2000 characters)
+ *
+ * ── HOW TO GET HERE ───────────────────────────────────────────────────────────
+ *   const overview   = new SubmissionOverviewPage(submissionTab);
+ *   await overview.clickBrokerInformationTab();
+ *   const brokerPage = new BrokerInformationPage(submissionTab);
+ *
+ * ── WHAT YOU SEE ON SCREEN ────────────────────────────────────────────────────
+ *   BROKER COMPANY *    [AUTOMATION-BrightPath Consulting 7]
+ *   WINS NUMBER         [auto-filled]
+ *   COUNTRY *           [USA ▼]
+ *   STREET ADDRESS *    [...]
+ *   STREET ADDRESS 2    [...]
+ *   CITY *              [...]
+ *   STATE/PROVINCE *    [▼]
+ *   ZIP/POSTAL CODE *   [...]
+ *   BROKER CONTACT      [Type...]
+ *   EMAIL               [Type...]   ← validates email format
+ *   COMMISSION (%)      [Type...]   ← must be 0-100
+ *   BROKER REVIEW/NOTES [Rich text] ← max 2000 chars, counter shows remaining
+ *   UNDERWRITING RATIONAL [Rich text]
+ *
+ * ── KEY BUSINESS RULES ────────────────────────────────────────────────────────
+ *   1. Email must be valid format (user@domain.com)
+ *   2. Commission: number between 0-100 (101+ shows error)
+ *   3. Broker Notes: max 2000 characters
+ *      - Counter starts at 2000 (empty field)
+ *      - As you type, it counts DOWN: 2000 → 1999 → ... → 0
+ *
+ * ── SETUP REQUIRED ────────────────────────────────────────────────────────────
+ * Replace all YOUR_*_SELECTOR with actual selectors.
+ */
+export class BrokerInformationPage extends BasePage {
+
+  // ── Page Ready Indicator ───────────────────────────────────────────────────
+  private readonly brokerCompanyInput: Locator;
+
+  // ── Broker Details ─────────────────────────────────────────────────────────
+  private readonly winsNumberInput:    Locator;
+  private readonly brokerContactInput: Locator;
+  private readonly emailInput:         Locator;
+  private readonly commissionInput:    Locator;
+
+  // ── Address ────────────────────────────────────────────────────────────────
+  private readonly countryContainer:   Locator;
+  private readonly countryInput:       Locator;
+  private readonly streetAddressInput: Locator;
+  private readonly streetAddress2Input: Locator;
+  private readonly cityInput:          Locator;
+  private readonly stateContainer:     Locator;
+  private readonly stateInput:         Locator;
+  private readonly zipInput:           Locator;
+
+  // ── Rich Text Fields ───────────────────────────────────────────────────────
+  // Broker Notes — max 2000 chars with live countdown counter
+  private readonly brokerNotesEditor:    Locator;
+  private readonly uwRationaleEditor:    Locator;
+
+  // ── Character Counter ──────────────────────────────────────────────────────
+  // Shows how many characters REMAIN (starts at 2000, counts DOWN to 0)
+  // Example display: "1950 characters remaining"
+  private readonly characterCounter:    Locator;
+
+  // ── Validation Errors ──────────────────────────────────────────────────────
+  private readonly emailError:          Locator;
+  private readonly commissionError:     Locator;
+
+  constructor(page: Page) {
+    super(page);
+
+    this.brokerCompanyInput  = page.locator('YOUR_BROKER_COMPANY_INPUT');
+    this.winsNumberInput     = page.locator('YOUR_BROKER_WINS_NUMBER_INPUT');
+    this.brokerContactInput  = page.locator('YOUR_BROKER_CONTACT_INPUT');
+    this.emailInput          = page.locator('YOUR_BROKER_EMAIL_INPUT');
+    this.commissionInput     = page.locator('YOUR_BROKER_COMMISSION_INPUT');
+
+    this.countryContainer    = page.locator('YOUR_BROKER_COUNTRY_CONTAINER');
+    this.countryInput        = page.locator('YOUR_BROKER_COUNTRY_INPUT');
+    this.streetAddressInput  = page.locator('YOUR_BROKER_STREET_ADDRESS_INPUT');
+    this.streetAddress2Input = page.locator('YOUR_BROKER_STREET_ADDRESS_2_INPUT');
+    this.cityInput           = page.locator('YOUR_BROKER_CITY_INPUT');
+    this.stateContainer      = page.locator('YOUR_BROKER_STATE_CONTAINER');
+    this.stateInput          = page.locator('YOUR_BROKER_STATE_INPUT');
+    this.zipInput            = page.locator('YOUR_BROKER_ZIP_INPUT');
+
+    this.brokerNotesEditor   = page.locator('YOUR_BROKER_NOTES_EDITOR_SELECTOR');
+    this.uwRationaleEditor   = page.locator('YOUR_BROKER_UW_RATIONALE_SELECTOR');
+    this.characterCounter    = page.locator('YOUR_BROKER_NOTES_CHARACTER_COUNTER');
+
+    this.emailError          = page.locator('YOUR_BROKER_EMAIL_ERROR_SELECTOR');
+    this.commissionError     = page.locator('YOUR_BROKER_COMMISSION_ERROR_SELECTOR');
+  }
+
+  // ── Page Load Check ────────────────────────────────────────────────────────
+
+  /**
+   * HOW THIS WORKS (simple explanation):
+   *   1. waitForLoadState('networkidle') — browser finished all background calls
+   *   2. brokerCompanyInput.waitFor('visible') — the Broker Company field appeared
+   *
+   * We use brokerCompanyInput because it's always on screen on this tab
+   * and it's always auto-filled from the submission creation, so it's
+   * a reliable signal that the tab has fully loaded.
+   */
+  async verifyPageLoaded(): Promise<void> {
+    await this.page.waitForLoadState('networkidle');
+
+    await this.brokerCompanyInput.waitFor({
+      state:   'visible',
+      timeout: 15_000,
+    });
+
+    this.log('Broker Information tab loaded');
+  }
+
+  async getPageTitle(): Promise<string> { return this.page.title(); }
+
+  // ── Read Field Values ──────────────────────────────────────────────────────
+
+  async getBrokerCompany():  Promise<string> { return (await this.brokerCompanyInput.inputValue()).trim(); }
+  async getWinsNumber():     Promise<string> { return (await this.winsNumberInput.inputValue()).trim(); }
+  async getEmail():          Promise<string> { return (await this.emailInput.inputValue()).trim(); }
+  async getCommission():     Promise<string> { return (await this.commissionInput.inputValue()).trim(); }
+  async getStreetAddress():  Promise<string> { return (await this.streetAddressInput.inputValue()).trim(); }
+  async getCity():           Promise<string> { return (await this.cityInput.inputValue()).trim(); }
+  async getZip():            Promise<string> { return (await this.zipInput.inputValue()).trim(); }
+
+  /**
+   * Reads the character counter number.
+   *
+   * HOW IT WORKS:
+   *   The counter element shows text like "1950 characters remaining"
+   *   We extract just the NUMBER from that text.
+   *
+   * EXAMPLE:
+   *   Counter text: "1950 characters remaining"
+   *   This method returns: 1950
+   */
+  async getRemainingCharacterCount(): Promise<number> {
+    const text  = (await this.characterCounter.innerText()).trim();
+    const match = text.match(/(\d+)/); // extract first number from text
+    return match ? parseInt(match[1], 10) : 0;
+  }
+
+  // ── Fill / Update Field Values ─────────────────────────────────────────────
+
+  async fillBrokerCompany(name: string): Promise<void> {
+    await this.brokerCompanyInput.clear();
+    await this.brokerCompanyInput.fill(name);
+    await this.brokerCompanyInput.press('Tab');
+    this.log(`Filled Broker Company: ${name}`);
+  }
+
+  async fillWinsNumber(wins: string): Promise<void> {
+    await this.winsNumberInput.clear();
+    await this.winsNumberInput.fill(wins);
+    await this.winsNumberInput.press('Tab');
+  }
+
+  async fillBrokerContact(contact: string): Promise<void> {
+    await this.brokerContactInput.clear();
+    await this.brokerContactInput.fill(contact);
+    await this.brokerContactInput.press('Tab');
+  }
+
+  /**
+   * Types an email address into the Email field.
+   * Pressing Tab triggers BOTH auto-save AND email format validation.
+   *
+   * VALID:   user@company.com     → no error shown
+   * INVALID: notanemail           → error: "Email must be a valid email"
+   * INVALID: user@               → error: "Email must be a valid email"
+   */
+  async fillEmail(email: string): Promise<void> {
+    await this.emailInput.clear();
+    await this.emailInput.fill(email);
+    await this.emailInput.press('Tab'); // triggers validation
+    this.log(`Filled Email: ${email}`);
+  }
+
+  /**
+   * Types a commission percentage.
+   *
+   * BUSINESS RULES:
+   *   0 to 100 = valid (no error)
+   *   101+ = error: commission must be ≤ 100
+   *
+   * EXAMPLES:
+   *   await brokerPage.fillCommission(15);   ← valid
+   *   await brokerPage.fillCommission(100);  ← valid (max)
+   *   await brokerPage.fillCommission(101);  ← invalid → error shows
+   */
+  async fillCommission(value: number): Promise<void> {
+    await this.commissionInput.clear();
+    await this.commissionInput.fill(String(value)); // convert number to string
+    await this.commissionInput.press('Tab');
+    this.log(`Filled Commission: ${value}%`);
+  }
+
+  async selectCountry(country: string): Promise<void> {
+    await this.countryContainer.click();
+    await this.page.waitForTimeout(400);
+    await this.page.locator(`[role="option"]:has-text("${country}")`).first().click();
+    await this.page.waitForLoadState('networkidle');
+    this.log(`Selected Country: ${country}`);
+  }
+
+  async fillStreetAddress(address: string): Promise<void> {
+    await this.streetAddressInput.clear();
+    await this.streetAddressInput.fill(address);
+    await this.streetAddressInput.press('Tab');
+  }
+
+  async fillCity(city: string): Promise<void> {
+    await this.cityInput.clear();
+    await this.cityInput.fill(city);
+    await this.cityInput.press('Tab');
+  }
+
+  async selectState(state: string): Promise<void> {
+    await this.stateContainer.click();
+    await this.page.waitForTimeout(400);
+    await this.page.locator(`[role="option"]:has-text("${state}")`).first().click();
+    this.log(`Selected State: ${state}`);
+  }
+
+  async fillZip(zip: string): Promise<void> {
+    await this.zipInput.clear();
+    await this.zipInput.fill(zip);
+    await this.zipInput.press('Tab');
+  }
+
+  /**
+   * Types into the Broker Notes rich text editor.
+   *
+   * BUSINESS RULE: Max 2000 characters.
+   * As you type, the counter COUNTS DOWN:
+   *   Empty field → "2000 characters remaining"
+   *   Type 50 chars → "1950 characters remaining"
+   *   Type 2000 chars → "0 characters remaining"
+   *
+   * WHAT IS A RICH TEXT EDITOR?
+   *   It's like a mini Word document inside a web page.
+   *   It's NOT a normal input field — it uses a special div with contenteditable.
+   *   That's why we click() first then fill() differently.
+   */
+  async fillBrokerNotes(text: string): Promise<void> {
+    await this.brokerNotesEditor.click();
+    await this.brokerNotesEditor.fill(text);
+    this.log(`Filled Broker Notes: ${text.length} characters`);
+  }
+
+  async clearBrokerNotes(): Promise<void> {
+    await this.brokerNotesEditor.click();
+    await this.brokerNotesEditor.press('Control+a');
+    await this.brokerNotesEditor.press('Delete');
+    this.log('Cleared Broker Notes');
+  }
+
+  async fillUWRationale(text: string): Promise<void> {
+    await this.uwRationaleEditor.click();
+    await this.uwRationaleEditor.fill(text);
+    this.log('Filled UW Rationale');
+  }
+
+  // ── Assert Field Values ────────────────────────────────────────────────────
+
+  async assertBrokerCompany(expected: string): Promise<void> {
+    await expect(
+      this.brokerCompanyInput,
+      `Broker Company should be "${expected}"`
+    ).toHaveValue(expected);
+    this.log(`✅ Broker Company: ${expected}`);
+  }
+
+  async assertWinsNumber(expected: string): Promise<void> {
+    await expect(this.winsNumberInput).toHaveValue(expected);
+    this.log(`✅ WINS Number: ${expected}`);
+  }
+
+  async assertEmail(expected: string): Promise<void> {
+    await expect(this.emailInput).toHaveValue(expected);
+    this.log(`✅ Email: ${expected}`);
+  }
+
+  async assertCommission(expected: number): Promise<void> {
+    await expect(this.commissionInput).toHaveValue(String(expected));
+    this.log(`✅ Commission: ${expected}%`);
+  }
+
+  async assertCountry(expected: string): Promise<void> {
+    const actual = (await this.countryInput.inputValue()).trim();
+    expect(actual, `Country: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ Country: ${expected}`);
+  }
+
+  async assertDefaultCountry(): Promise<void> {
+    await this.assertCountry('USA');
+  }
+
+  async assertStreetAddress(expected: string): Promise<void> {
+    await expect(this.streetAddressInput).toHaveValue(expected);
+    this.log(`✅ Street Address: ${expected}`);
+  }
+
+  async assertCity(expected: string): Promise<void> {
+    await expect(this.cityInput).toHaveValue(expected);
+    this.log(`✅ City: ${expected}`);
+  }
+
+  async assertState(expected: string): Promise<void> {
+    const actual = (await this.stateInput.inputValue()).trim();
+    expect(actual, `State: expected "${expected}" got "${actual}"`).toBe(expected);
+    this.log(`✅ State: ${expected}`);
+  }
+
+  async assertZip(expected: string): Promise<void> {
+    await expect(this.zipInput).toHaveValue(expected);
+    this.log(`✅ Zip: ${expected}`);
+  }
+
+  // ── Email Validation Assertions ────────────────────────────────────────────
+
+  /**
+   * Checks the "Email must be a valid email" error IS showing.
+   * Call this AFTER fillEmail() with an invalid email.
+   */
+  async assertEmailValidationError(): Promise<void> {
+    await expect(
+      this.emailError,
+      'Email error message should appear for invalid email'
+    ).toBeVisible();
+    await expect(this.emailError).toContainText('valid email');
+    this.log('✅ Email validation error shown');
+  }
+
+  /**
+   * Checks the email error is NOT showing.
+   * Call this AFTER fillEmail() with a valid email.
+   */
+  async assertNoEmailValidationError(): Promise<void> {
+    await expect(
+      this.emailError,
+      'Email error should NOT appear for valid email'
+    ).toBeHidden();
+    this.log('✅ No email validation error');
+  }
+
+  // ── Commission Validation Assertions ──────────────────────────────────────
+
+  async assertCommissionValidationError(): Promise<void> {
+    await expect(
+      this.commissionError,
+      'Commission error should appear for value > 100'
+    ).toBeVisible();
+    this.log('✅ Commission validation error shown');
+  }
+
+  async assertNoCommissionValidationError(): Promise<void> {
+    await expect(
+      this.commissionError,
+      'Commission error should NOT appear'
+    ).toBeHidden();
+    this.log('✅ No commission validation error');
+  }
+
+  // ── Character Counter Assertions ───────────────────────────────────────────
+
+  /**
+   * Checks the counter shows 2000 (field is empty).
+   *
+   * HOW IT WORKS:
+   *   getRemainingCharacterCount() reads the number from the counter element
+   *   Then we compare it to the expected value (2000)
+   */
+  async assertCounterAtMaximum(): Promise<void> {
+    const count = await this.getRemainingCharacterCount();
+    expect(
+      count,
+      `Counter should be 2000 (empty field) but got ${count}`
+    ).toBe(2000);
+    this.log('✅ Character counter at 2000 (empty field)');
+  }
+
+  /**
+   * Checks the counter shows the correct number after typing.
+   *
+   * HOW IT WORKS:
+   *   If you typed 50 characters → counter should show 1950
+   *   Formula: 2000 - charsTyped = expected remaining
+   *
+   * EXAMPLE:
+   *   await brokerPage.fillBrokerNotes('A'.repeat(100));
+   *   await brokerPage.assertCounterAfterTyping(100); // expects 1900
+   */
+  async assertCounterAfterTyping(charsTyped: number): Promise<void> {
+    const expectedRemaining = 2000 - charsTyped;
+    const actualRemaining   = await this.getRemainingCharacterCount();
+    expect(
+      actualRemaining,
+      `Counter should be ${expectedRemaining} after typing ${charsTyped} chars, got ${actualRemaining}`
+    ).toBe(expectedRemaining);
+    this.log(`✅ Counter: ${actualRemaining} remaining after ${charsTyped} chars`);
+  }
+
+  async assertCounterAtZero(): Promise<void> {
+    const count = await this.getRemainingCharacterCount();
+    expect(count, `Counter should be 0 at max but got ${count}`).toBe(0);
+    this.log('✅ Character counter at 0 (max reached)');
+  }
+
+  // ── Combined: Verify auto-population from submission ──────────────────────
+
+  async assertAutoPopulatedFromSubmission(data: SubmissionFormData): Promise<void> {
+    this.log('--- Verifying Broker Information auto-population ---');
+
+    await this.assertBrokerCompany(data.broker.brokerCompany);
+    await this.assertDefaultCountry();
+    await this.assertStreetAddress(data.broker.streetAddress);
+    await this.assertCity(data.broker.city);
+    await this.assertState(data.broker.state);
+    await this.assertZip(data.broker.zip);
+
+    if (data.broker.wins) {
+      await this.assertWinsNumber(data.broker.wins);
+    }
+
+    this.log('--- Broker Information verified ✅ ---');
+  }
+}
+------------------------------------------------------------------------------------------------------
+/**
+ * Wait for the Exposures & Quotes page to be ready.
+ *
+ * HOW IT WORKS (simple explanation):
+ *   1. waitForLoadState('networkidle') — browser stopped all background calls
+ *      Like: the webpage finished downloading everything it needs
+ *
+ *   2. pageLoadedIndicator.waitFor({ state: 'visible' }) — the main element appeared
+ *      Like: you can actually see the "Exposures & Quotes" content on screen
+ *
+ * WHY THIS IS BETTER THAN SPINNER:
+ *   Spinner = waiting for something to GO AWAY (unreliable — may never appear)
+ *   waitFor = waiting for something to SHOW UP   (reliable — clear success condition)
+ */
+async verifyPageLoaded(): Promise<void> {
+  // Step 1: Wait for all network calls to finish
+  await this.page.waitForLoadState('networkidle');
+
+  // Step 2: Wait for a specific visible element to confirm the page is ready
+  // Replace 'YOUR_EXPOSURES_PAGE_LOADED_INDICATOR' with the selector of
+  // any element that is ALWAYS visible on the Exposures & Quotes page
+  // e.g. the "Quote" tab button, or the "Add New" button, or the page heading
+  await this.pageLoadedIndicator.waitFor({
+    state:   'visible',  // wait until it appears on screen
+    timeout: 15_000,     // fail if not visible within 15 seconds
+  });
+
+  this.log('Exposures & Quotes page loaded');
+}
+----------------------------------------------------------------------------------------
+
+// In SubmissionOverviewPage.ts — update these three methods
+
+/**
+ * Clicks the "Insured Information" tab inside General Information.
+ * After calling this, create InsuredInformationPage with the same page reference.
+ *
+ * Example:
+ *   await overview.clickInsuredInformationTab();
+ *   const insuredPage = new InsuredInformationPage(submissionTab);
+ *   await insuredPage.verifyPageLoaded();
+ */
+async clickInsuredInformationTab(): Promise<void> {
+  await this.clickGeneralInformation();  // first click General Information in sidebar
+  await this.insuredInfoTab.click();
+  await this.page.waitForLoadState('networkidle');
+  this.log('Clicked Insured Information tab');
+}
+
+/**
+ * Clicks the "Policy Information" tab inside General Information.
+ * After calling this, create PolicyInformationPage with the same page reference.
+ */
+async clickPolicyInformationTab(): Promise<void> {
+  await this.clickGeneralInformation();
+  await this.policyInfoTab.click();
+  await this.page.waitForLoadState('networkidle');
+  this.log('Clicked Policy Information tab');
+}
+
+/**
+ * Clicks the "Broker Information" tab inside General Information.
+ * After calling this, create BrokerInformationPage with the same page reference.
+ */
+async clickBrokerInformationTab(): Promise<void> {
+  await this.clickGeneralInformation();
+  await this.brokerInfoTab.click();
+  await this.page.waitForLoadState('networkidle');
+  this.log('Clicked Broker Information tab');
+}
+-------------------------------------------------------------------------------------------------------------
+You open a submission → new tab opens
+
+LEFT SIDEBAR shows:
+  SUBMISSION
+    └── General Information  ← click here
+
+THREE TABS appear across the top:
+  [Insured Information] [Policy Information] [Broker Information]
+  ↑ tab 1               ↑ tab 2              ↑ tab 3
+
+In automation, the pattern is ALWAYS the same for all three:
+
+  STEP 1: Navigate to the tab
+    await overview.clickInsuredInformationTab();   ← sidebar + tab click
+    await overview.clickPolicyInformationTab();    ← sidebar + tab click
+    await overview.clickBrokerInformationTab();    ← sidebar + tab click
+
+  STEP 2: Create the page object with the SAME page reference
+    const insuredPage = new InsuredInformationPage(submissionTab);
+    const policyPage  = new PolicyInformationPage(submissionTab);
+    const brokerPage  = new BrokerInformationPage(submissionTab);
+    ↑ Important: all three use 'submissionTab' — NOT a new variable
+    ↑ Because they are all on the SAME browser tab, just different tab sections
+
+  STEP 3: Wait for the tab to load
+    await insuredPage.verifyPageLoaded();   ← waits for Broker Company field
+    await policyPage.verifyPageLoaded();    ← waits for Submission Number field
+    await brokerPage.verifyPageLoaded();    ← waits for First Named Insured field
+
+  STEP 4: Do your work (verify or fill)
+    await insuredPage.assertAutoPopulatedFromSubmission(data);
+    await policyPage.assertAutoPopulatedFromSubmission(data);
+    await brokerPage.assertAutoPopulatedFromSubmission(data);
