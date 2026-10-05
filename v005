@@ -1,828 +1,269 @@
-----------------------------------
-SubmissionOverviewPage
-----------------------------------
-import { Page, Locator, expect } from '@playwright/test';
-import { BasePage }               from './base/BasePage';
-import { SubmissionFormData }     from '../types/submission.types';
-import { DateHelper }             from '../helpers/DateHelper';
-import { UrlHelper }              from '../helpers/UrlHelper';
-import { EnvironmentConfig }      from '../config/environment.config';
+import { test, expect }               from '../../src/fixtures/index';
+import { Tags }                       from '../../src/constants/test-tags.constants';
+import { Role }                       from '../../src/enums/role.enum';
+import { SubmissionContext }          from '../../src/types/submission.types';
+import { SubmissionSetupService }     from '../../src/services/SubmissionSetupService';
+import { DateHelper }                 from '../../src/helpers/DateHelper';
 
 /**
- * SubmissionOverviewPage
+ * general-information.spec.ts
  *
- * Handles the top bar (read-only summary) and sidebar navigation
- * of the submission detail page.
+ * Tests General Information — the EDITABLE section of a submission.
+ * Three tabs: Insured Information | Policy Information | Broker Information
  *
- * DATA LOADING BEHAVIOUR (TWO PHASES):
+ * ── SPEC DESIGN ──────────────────────────────────────────────────────────
+ *   ONE submission created in the outer beforeAll.
+ *   Shared across all three tab describe blocks.
+ *   Each tab's beforeEach navigates fresh and clicks the correct tab.
  *
- *   Phase 1 — DOM renders (fast, ~200ms):
- *     Named Insured:  ""      or "None"  ← PLACEHOLDER
- *     Submission No:  ""      or "None"  ← PLACEHOLDER
- *     Status:         "Open"             ← this one loads immediately
+ *   TEST ORDER WITHIN EACH DESCRIBE:
+ *     1. Auto-population validation (read-only checks against formData)
+ *     2. Edit tests (modify fields and verify — may persist changes)
+ *     3. Validation tests (error states, constraints)
  *
- *   Phase 2 — API responds (slow, 1-3 seconds):
- *     Named Insured:  "AUTOMATION-Aurora Enterprises"  ← REAL DATA
- *     Submission No:  "4061442121"                     ← REAL DATA
+ *   IMPORTANT: Edit tests run after auto-population checks.
+ *   If an edit test modifies a field, subsequent auto-population tests
+ *   would see modified data. By ordering read-first, this is avoided.
  *
- *   DO NOT ASSERT after Phase 1 — you will get placeholder values.
- *   ALWAYS call waitForDataLoaded(expectedNamedInsured) before asserting.
+ * ── NAVIGATION PATTERN ───────────────────────────────────────────────────
+ *   beforeEach for each tab describe:
+ *     1. navigateByUrl() — fresh navigation to submission
+ *     2. waitUntilLoaded() — wait for Overview data (confirms page is ready)
+ *     3. clickXxxInformationTab() — navigate to the specific tab
+ *     4. In test: page.verifyPageLoaded() — confirm tab is active
  *
- * SETUP REQUIRED: Replace all YOUR_*_SELECTOR with actual selectors.
+ * ── WHY waitUntilLoaded() IN TAB BEFOREEACH ──────────────────────────────
+ *   Even though we're going to a tab (not validating the Overview),
+ *   waitUntilLoaded() is called because:
+ *     - It confirms the submission page has loaded completely
+ *     - The editable tab fields may also have async population
+ *     - It ensures consistent, stable state before tab navigation
  */
-export class SubmissionOverviewPage extends BasePage {
-
-  // ── Loading ────────────────────────────────────────────────────────────────
-  private readonly pageLoadedIndicator:   Locator;
-
-  // ── Top Bar Read-Only Fields ───────────────────────────────────────────────
-  // All are span/div elements (innerText) not input fields
-  private readonly namedInsuredValue:     Locator;
-  private readonly submissionNoValue:     Locator;
-  private readonly inceptionDateValue:    Locator;
-  private readonly policyNumberValue:     Locator;
-  private readonly underwriterValue:      Locator;
-  private readonly currentAssigneeValue:  Locator;
-  private readonly statusDropdown:        Locator;
-
-  // ── Sidebar Navigation Links ──────────────────────────────────────────────
-  private readonly generalInformationLink:  Locator;
-  private readonly exposuresAndQuotesLink:  Locator;
-  private readonly locationManagementLink:  Locator;
-  private readonly manageReferralsLink:     Locator;
-
-  // ── General Information Sub-tabs ──────────────────────────────────────────
-  private readonly insuredInfoTab:  Locator;
-  private readonly policyInfoTab:   Locator;
-  private readonly brokerInfoTab:   Locator;
-
-  constructor(page: Page) {
-    super(page);
-
-    this.pageLoadedIndicator  = page.locator('YOUR_PAGE_LOADED_INDICATOR_SELECTOR');
-
-    // Top bar fields — all read-only display elements
-    this.namedInsuredValue    = page.locator('YOUR_NAMED_INSURED_VALUE_SELECTOR');
-    this.submissionNoValue    = page.locator('YOUR_SUBMISSION_NO_VALUE_SELECTOR');
-    this.inceptionDateValue   = page.locator('YOUR_INCEPTION_DATE_VALUE_SELECTOR');
-    this.policyNumberValue    = page.locator('YOUR_POLICY_NUMBER_VALUE_SELECTOR');
-    this.underwriterValue     = page.locator('YOUR_UNDERWRITER_VALUE_SELECTOR');
-    this.currentAssigneeValue = page.locator('YOUR_CURRENT_ASSIGNEE_VALUE_SELECTOR');
-    this.statusDropdown       = page.locator('YOUR_STATUS_DROPDOWN_SELECTOR');
-
-    // Sidebar
-    this.generalInformationLink = page.locator('YOUR_GENERAL_INFORMATION_LINK_SELECTOR');
-    this.exposuresAndQuotesLink = page.locator('YOUR_EXPOSURES_AND_QUOTES_LINK_SELECTOR');
-    this.locationManagementLink = page.locator('YOUR_LOCATION_MANAGEMENT_LINK_SELECTOR');
-    this.manageReferralsLink    = page.locator('YOUR_MANAGE_REFERRALS_LINK_SELECTOR');
-
-    // General Information sub-tabs
-    this.insuredInfoTab = page.locator('YOUR_INSURED_INFO_TAB_SELECTOR');
-    this.policyInfoTab  = page.locator('YOUR_POLICY_INFO_TAB_SELECTOR');
-    this.brokerInfoTab  = page.locator('YOUR_BROKER_INFO_TAB_SELECTOR');
-  }
-
-  // ── Navigation ────────────────────────────────────────────────────────────
-
-  async navigate(displayId: string, metrixSubmissionId: string): Promise<void> {
-    const config = EnvironmentConfig.getConfig();
-    const url    = UrlHelper.buildSubmissionUrl(config.baseUrl, displayId, metrixSubmissionId);
-    await this.page.goto(url);
-    await this.page.waitForURL(
-      (u) => UrlHelper.isSubmissionPage(u),
-      { timeout: 30_000 },
-    );
-    await this.page.waitForLoadState('networkidle');
-    this.log(`Navigated to submission | ${metrixSubmissionId}`);
-  }
-
-  async navigateByUrl(url: string): Promise<void> {
-    await this.page.goto(url);
-    await this.page.waitForURL(
-      (u) => UrlHelper.isSubmissionPage(u),
-      { timeout: 30_000 },
-    );
-    await this.page.waitForLoadState('networkidle');
-    this.log(`Navigated by URL: ${url}`);
-  }
-
-  // ── Page Load — Phase 1 ────────────────────────────────────────────────────
-
-  /**
-   * Waits for the page DOM to be present.
-   * Does NOT guarantee real data is loaded — call waitForDataLoaded() next.
-   */
-  async verifyPageLoaded(): Promise<void> {
-    await this.page.waitForLoadState('networkidle');
-    await this.pageLoadedIndicator.waitFor({ state: 'visible', timeout: 15_000 });
-    this.log('Submission page DOM loaded');
-  }
-
-  // ── Data Load — Phase 2 (THE KEY FIX) ─────────────────────────────────────
-
-  /**
-   * Waits for the REAL submission data to load in the Overview top bar.
-   *
-   * WHY THIS IS NEEDED:
-   *   When a submission opens, the page renders immediately with placeholder values.
-   *   Then an API call fetches the real data (Named Insured, Submission No etc.).
-   *   This can take 1-3 seconds after the DOM is visible.
-   *
-   *   Without this wait:
-   *     namedInsuredValue.innerText() → "" or "None"   ← WRONG (placeholder)
-   *
-   *   With this wait:
-   *     namedInsuredValue.innerText() → "AUTOMATION-Aurora Enterprises" ← RIGHT
-   *
-   * HOW IT WORKS:
-   *   We wait until the Named Insured field shows the EXACT expected value.
-   *   This uses Playwright's built-in retry — it keeps checking every 100ms
-   *   until the value appears or the timeout is reached (30 seconds).
-   *
-   * @param expectedNamedInsured - The exact Named Insured we expect to see.
-   *                               Pass data.insured.namedInsured from your test.
-   */
-  async waitForDataLoaded(expectedNamedInsured: string): Promise<void> {
-    this.log(`Waiting for Overview data to load... expecting: "${expectedNamedInsured}"`);
-
-    // Playwright's expect() has built-in retry — it polls until the assertion passes.
-    // This is the correct way to wait for dynamic content in Playwright.
-    // Default retry interval: every 100ms until timeout.
-    await expect(
-      this.namedInsuredValue,
-      `Named Insured should show "${expectedNamedInsured}" but still showing placeholder.\n` +
-      `The API response is taking longer than expected.`
-    ).toHaveText(expectedNamedInsured, { timeout: 30_000 });
-
-    this.log(`Overview data loaded: "${expectedNamedInsured}"`);
-  }
-
-  /**
-   * Use this when you don't know the exact expected value.
-   * Waits until the Named Insured shows ANYTHING that's not a placeholder.
-   *
-   * Placeholders detected: "", "None", "-", "N/A", "Loading"
-   */
-  async waitForAnyDataLoaded(): Promise<void> {
-    this.log('Waiting for Overview to load non-placeholder data...');
-
-    // expect.poll() retries the function until it returns true or times out.
-    // Use this when you need a custom condition (not a simple value match).
-    await expect.poll(
-      async () => {
-        const text = (await this.namedInsuredValue.innerText()).trim();
-        // Return true only when field has real data — not a placeholder
-        const isPlaceholder = (
-          text === '' ||
-          text === 'None' ||
-          text === '-' ||
-          text === 'N/A' ||
-          text.toLowerCase() === 'loading'
-        );
-        return !isPlaceholder;
-      },
-      {
-        message: 'Named Insured field still showing placeholder value',
-        timeout:   30_000,
-        intervals: [200, 500, 1000, 2000],
-      }
-    ).toBeTruthy();
-
-    this.log(`Overview data loaded: "${await this.getNamedInsured()}"`);
-  }
-
-  // ── Field Readers ──────────────────────────────────────────────────────────
-
-  private async getFieldText(locator: Locator): Promise<string> {
-    return (await locator.innerText()).trim();
-  }
-
-  async getNamedInsured():    Promise<string> { return this.getFieldText(this.namedInsuredValue);    }
-  async getSubmissionNumber(): Promise<string> { return this.getFieldText(this.submissionNoValue);    }
-  async getInceptionDate():   Promise<string> { return this.getFieldText(this.inceptionDateValue);   }
-  async getPolicyNumber():    Promise<string> { return this.getFieldText(this.policyNumberValue);    }
-  async getUnderwriter():     Promise<string> { return this.getFieldText(this.underwriterValue);     }
-  async getCurrentAssignee(): Promise<string> { return this.getFieldText(this.currentAssigneeValue); }
-  async getStatus():          Promise<string> { return this.getFieldText(this.statusDropdown);       }
-
-  // ── Field Assertions ───────────────────────────────────────────────────────
-
-  async assertNamedInsured(expected: string): Promise<void> {
-    // toHaveText() retries automatically — no need for waitForDataLoaded before this
-    // if you call assertNamedInsured directly with timeout: 30_000
-    await expect(
-      this.namedInsuredValue,
-      `Named Insured: expected "${expected}"`
-    ).toHaveText(expected, { timeout: 30_000 });
-    this.log(`✅ Named Insured: ${expected}`);
-  }
-
-  async assertSubmissionNumber(expected: string): Promise<void> {
-    await expect(
-      this.submissionNoValue,
-      `Submission No: expected "${expected}"`
-    ).toHaveText(expected, { timeout: 15_000 });
-    this.log(`✅ Submission No: ${expected}`);
-  }
-
-  async assertInceptionDate(expected: string): Promise<void> {
-    await expect(
-      this.inceptionDateValue,
-      `Inception Date: expected "${expected}"`
-    ).toHaveText(expected, { timeout: 15_000 });
-    this.log(`✅ Inception Date: ${expected}`);
-  }
-
-  async assertPolicyNumber(expected: string = 'None'): Promise<void> {
-    await expect(
-      this.policyNumberValue,
-      `Policy Number: expected "${expected}"`
-    ).toHaveText(expected, { timeout: 15_000 });
-    this.log(`✅ Policy Number: ${expected}`);
-  }
-
-  async assertDefaultStatus(): Promise<void> {
-    await expect(
-      this.statusDropdown,
-      'Status should default to "Open"'
-    ).toContainText('Open', { timeout: 15_000 });
-    this.log('✅ Status: Open (default)');
-  }
-
-  async assertStatus(expected: string): Promise<void> {
-    await expect(
-      this.statusDropdown,
-      `Status: expected "${expected}"`
-    ).toContainText(expected, { timeout: 15_000 });
-    this.log(`✅ Status: ${expected}`);
-  }
-
-  async assertUnderwriter(expected: string): Promise<void> {
-    await expect(
-      this.underwriterValue,
-      `Underwriter: expected "${expected}"`
-    ).toHaveText(expected, { timeout: 15_000 });
-    this.log(`✅ Underwriter: ${expected}`);
-  }
-
-  async assertCurrentAssignee(expected: string): Promise<void> {
-    await expect(
-      this.currentAssigneeValue,
-      `Current Assignee: expected "${expected}"`
-    ).toHaveText(expected, { timeout: 15_000 });
-    this.log(`✅ Current Assignee: ${expected}`);
-  }
-
-  async assertCurrentAssigneeMatchesUnderwriter(): Promise<void> {
-    const uw = await this.getUnderwriter();
-    const ca = await this.getCurrentAssignee();
-    expect(ca, `Current Assignee "${ca}" must match Underwriter "${uw}"`).toBe(uw);
-    this.log(`✅ Current Assignee matches Underwriter: ${uw}`);
-  }
-
-  // ── Sidebar Assertions ─────────────────────────────────────────────────────
-
-  async assertSidebarVisible(): Promise<void> {
-    await expect(this.generalInformationLink, 'General Information link').toBeVisible();
-    await expect(this.exposuresAndQuotesLink, 'Exposures & Quotes link').toBeVisible();
-    this.log('✅ Sidebar visible');
-  }
-
-  // ── Sidebar Navigation ─────────────────────────────────────────────────────
-
-  async clickGeneralInformation(): Promise<void> {
-    await this.generalInformationLink.click();
-    await this.page.waitForLoadState('networkidle');
-    this.log('Clicked General Information');
-  }
-
-  async clickExposuresAndQuotes(): Promise<void> {
-    await this.exposuresAndQuotesLink.click();
-    await this.page.waitForLoadState('networkidle');
-    this.log('Clicked Exposures & Quotes');
-  }
-
-  // ── General Information Sub-tab Navigation ────────────────────────────────
-
-  /**
-   * Navigates to General Information → Insured Information tab.
-   * After this, insuredInfoPage fixture is ready to use directly.
-   */
-  async clickInsuredInformationTab(): Promise<void> {
-    await this.clickGeneralInformation();
-    await this.insuredInfoTab.click();
-    await this.page.waitForLoadState('networkidle');
-    this.log('Clicked Insured Information tab');
-  }
-
-  /**
-   * Navigates to General Information → Policy Information tab.
-   * After this, policyInfoPage fixture is ready to use directly.
-   */
-  async clickPolicyInformationTab(): Promise<void> {
-    await this.clickGeneralInformation();
-    await this.policyInfoTab.click();
-    await this.page.waitForLoadState('networkidle');
-    this.log('Clicked Policy Information tab');
-  }
-
-  /**
-   * Navigates to General Information → Broker Information tab.
-   * After this, brokerInfoPage fixture is ready to use directly.
-   */
-  async clickBrokerInformationTab(): Promise<void> {
-    await this.clickGeneralInformation();
-    await this.brokerInfoTab.click();
-    await this.page.waitForLoadState('networkidle');
-    this.log('Clicked Broker Information tab');
-  }
-
-  // ── Combined Assertion ─────────────────────────────────────────────────────
-
-  async assertTopBarMatchesSubmissionData(data: SubmissionFormData): Promise<void> {
-    this.log('--- Asserting Overview top bar ---');
-    // Each assertion uses toHaveText() which has built-in retry
-    // No need to call waitForDataLoaded() separately — these wait internally
-    await this.assertNamedInsured(data.insured.namedInsured);
-    await this.assertSubmissionNumber(data.submissionNumber);
-    await this.assertInceptionDate(data.inceptionDate);
-    await this.assertPolicyNumber('None');
-    await this.assertDefaultStatus();
-    await this.assertCurrentAssigneeMatchesUnderwriter();
-    await this.assertSidebarVisible();
-    this.log('--- Overview top bar verified ✅ ---');
-  }
-
-  async getPageTitle(): Promise<string> { return this.page.title(); }
-}
-
-
-------------------------------------------------------
-tests/submission/submission-overview.spec.ts
-------------------------------------------------------
-import { test, expect }      from '../../src/fixtures/index';
-import { Tags }              from '../../src/constants/test-tags.constants';
-import { Role }              from '../../src/enums/role.enum';
-import { SubmissionFactory } from '../../src/data/factories/SubmissionFactory';
-import { SubmissionManager } from '../../src/data/managers/SubmissionManager';
-import { UrlHelper }         from '../../src/helpers/UrlHelper';
 
 test.use({ role: Role.UW });
 
-test.describe('Submission Overview — Top Bar Validation', () => {
+test.describe('General Information', () => {
 
-  /**
-   * FIXTURE PATTERN EXPLAINED:
-   *
-   * All fixtures (submissionOverview, insuredInfoPage, brokerInfoPage, policyInfoPage)
-   * share the SAME 'authenticatedPage' reference.
-   *
-   * After submission creation:
-   *   newTab = a different browser tab (the one that opened automatically)
-   *   We navigate 'authenticatedPage' to the submission URL.
-   *   Then all fixtures automatically point to that submission.
-   *
-   * We NEVER create: new SubmissionOverviewPage(newTab)
-   * We ALWAYS use:   submissionOverview (the fixture)
-   */
+  // ── Single submission shared by ALL tests in this file ───────────────────
+  let submissionCtx!: SubmissionContext;
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 1 — Create NOW → navigate fixture page → verify
-  // ══════════════════════════════════════════════════════════════════════════
+  test.beforeAll(async ({ browser }) => {
+    submissionCtx = await SubmissionSetupService.createAndStoreContext(browser, Role.UW);
 
-  test.describe('Validate after submission creation', () => {
+    console.log([
+      '',
+      '=== Submission Created (General Information Suite) ===',
+      `  Submission No:      ${submissionCtx.formData.submissionNumber}`,
+      `  Named Insured:      ${submissionCtx.formData.insured.namedInsured}`,
+      `  Policy Type:        ${submissionCtx.formData.policyType}`,
+      `  metrixSubmissionId: ${submissionCtx.metrixSubmissionId}`,
+      '=====================================================',
+    ].join('\n'));
+  });
 
-    test.beforeEach(async ({ dashboardPage }) => {
-      await dashboardPage.navigate();
+  // ════════════════════════════════════════════════════════════════════════
+  // TAB 1 — INSURED INFORMATION
+  // ════════════════════════════════════════════════════════════════════════
+
+  test.describe('Insured Information tab', () => {
+
+    test.beforeEach(async ({ submissionOverview }) => {
+      // Navigate fresh to the submission for every test
+      await submissionOverview.navigateByUrl(submissionCtx.submissionUrl);
+      // Wait for Overview data — ensures page is in a stable, ready state
+      await submissionOverview.waitUntilLoaded();
+      // Click General Information → Insured Information tab
+      await submissionOverview.clickInsuredInformationTab();
     });
 
+    // ── SMOKE ──────────────────────────────────────────────────────────────
+
     test(
-      `${Tags.SMOKE} ${Tags.SUBMISSION} ${Tags.OVERVIEW} `
-      + 'Create submission → all top bar fields match creation data',
+      `${Tags.SMOKE} ${Tags.INSURED} All insured fields auto-populated from creation data`,
 
-      async ({
-        dashboardPage,
-        newSubmissionModal,
-        authenticatedPage,
-        submissionOverview,    // ← fixture, wraps authenticatedPage
-      }) => {
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
 
-        const data = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        await newSubmissionModal.verifyPageLoaded();
+        // Uses formData — the single source of truth from creation
+        // NEVER call SubmissionFactory.default() here — it generates NEW random data
+        await insuredInfoPage.assertAutoPopulatedFromSubmission(submissionCtx.formData);
+      }
+    );
 
-        // Step 1: Create — a new browser tab opens automatically
-        const newTab = await newSubmissionModal.createSubmission(
-          data,
-          authenticatedPage.context(),
+    // ── SANITY — Individual field checks ───────────────────────────────────
+
+    test(
+      `${Tags.SANITY} ${Tags.INSURED} First Named Insured matches creation data`,
+
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        await insuredInfoPage.assertNamedInsured(
+          submissionCtx.formData.insured.namedInsured
         );
-
-        // Step 2: Extract IDs from the new tab URL
-        const url                = newTab.url();
-        const metrixSubmissionId = UrlHelper.extractMetrixSubmissionId(url);
-        const displayId          = UrlHelper.extractDisplayId(url);
-
-        expect(metrixSubmissionId, `Could not extract ID from: ${url}`).not.toBe('');
-
-        // Step 3: Store for other spec files
-        SubmissionManager.store({
-          metrixSubmissionId,
-          displayId,
-          submissionUrl:    url,
-          quoteId:          '',
-          submissionNumber: data.submissionNumber,
-          namedInsured:     data.insured.namedInsured,
-          createdAt:        Date.now(),
-          environment:      process.env.ENVIRONMENT ?? 'qa',
-        });
-
-        // Step 4: Navigate the FIXTURE's page to the submission URL
-        // Now 'submissionOverview' is on the submission page — no new object needed
-        await submissionOverview.navigateByUrl(url);
-
-        // Step 5: Wait for Phase 1 (DOM) to be ready
-        await submissionOverview.verifyPageLoaded();
-
-        // Step 6: Wait for Phase 2 (real API data) to load
-        // THE KEY FIX — waits until Named Insured shows the real value, not placeholder
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-
-        // Step 7: Assert all top bar fields — data is now loaded
-        await submissionOverview.assertTopBarMatchesSubmissionData(data);
       }
     );
 
     test(
-      `${Tags.SANITY} ${Tags.OVERVIEW} Named Insured matches creation data`,
+      `${Tags.SANITY} ${Tags.INSURED} Country matches creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.assertNamedInsured(data.insured.namedInsured);
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        // assertCountry uses DropdownComponent.getSelectedValue() internally
+        await insuredInfoPage.assertCountry(submissionCtx.formData.insured.country);
       }
     );
 
     test(
-      `${Tags.SANITY} ${Tags.OVERVIEW} Status defaults to Open`,
+      `${Tags.SANITY} ${Tags.INSURED} Address fields match creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.assertDefaultStatus();
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        await insuredInfoPage.assertStreetAddress(submissionCtx.formData.insured.streetAddress);
+        await insuredInfoPage.assertCity(submissionCtx.formData.insured.city);
+        await insuredInfoPage.assertState(submissionCtx.formData.insured.state);
+        await insuredInfoPage.assertZip(submissionCtx.formData.insured.zip);
       }
     );
 
     test(
-      `${Tags.SANITY} ${Tags.OVERVIEW} Policy Number defaults to None`,
+      `${Tags.REGRESSION} ${Tags.INSURED} "+ Add Named Insured" button is visible`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview }) => {
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        await insuredInfoPage.assertAddNamedInsuredButtonVisible();
+      }
+    );
 
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
+    // ── REGRESSION — Edit tests (run after auto-population checks) ─────────
 
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.assertPolicyNumber('None');
+    test(
+      `${Tags.REGRESSION} ${Tags.INSURED} Can update Named Insured — value saves`,
+
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        const updatedName = 'UPDATED-Company 999';
+        await insuredInfoPage.fillNamedInsured(updatedName);
+        await insuredInfoPage.assertNamedInsured(updatedName);
       }
     );
 
     test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Submission Number matches creation data`,
+      `${Tags.REGRESSION} ${Tags.INSURED} Country change to Canada updates State list`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.assertSubmissionNumber(data.submissionNumber);
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        // DropdownComponent.select() handles open + click
+        await insuredInfoPage.selectCountry('Canada');
+        await insuredInfoPage.assertCountry('Canada');
+        // State list now shows Canadian provinces
+        await insuredInfoPage.selectState('Ontario');
+        await insuredInfoPage.assertState('Ontario');
       }
     );
 
     test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Current Assignee matches Underwriter`,
+      `${Tags.REGRESSION} ${Tags.INSURED} Required error appears when Named Insured is cleared`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.assertCurrentAssigneeMatchesUnderwriter();
+      async ({ insuredInfoPage }) => {
+        await insuredInfoPage.verifyPageLoaded();
+        await insuredInfoPage.fillNamedInsured('');
+        await insuredInfoPage.assertNamedInsuredRequired();
       }
     );
 
-    test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Sidebar navigation is visible`,
+    // ── Guest Role ──────────────────────────────────────────────────────────
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview }) => {
+    test.describe('Guest Role', () => {
+      test.use({ role: Role.GUEST });
 
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
+      test(
+        `${Tags.REGRESSION} ${Tags.GUEST} Insured fields are disabled for Guest`,
 
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.assertSidebarVisible();
-      }
-    );
-
-    test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Dashboard table shows new submission`,
-
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage }) => {
-
-        const data = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        // Dashboard is still on authenticatedPage (we haven't navigated away)
-        await dashboardPage.assertSubmissionInTable(data.submissionNumber);
-      }
-    );
+        async ({ insuredInfoPage }) => {
+          await insuredInfoPage.verifyPageLoaded();
+          await expect(
+            insuredInfoPage['firstNamedInsuredInput'],
+            'Named Insured should be disabled for Guest role'
+          ).toBeDisabled();
+        }
+      );
+    });
   });
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 2 — Navigate to stored submission using fixtures
-  // ══════════════════════════════════════════════════════════════════════════
+  // ════════════════════════════════════════════════════════════════════════
+  // TAB 2 — POLICY INFORMATION
+  // ════════════════════════════════════════════════════════════════════════
 
-  test.describe('Validate stored submission via direct navigation', () => {
+  test.describe('Policy Information tab', () => {
 
-    test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Named Insured matches stored value`,
-
-      async ({ submissionOverview }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission. Run smoke test first.'); return; }
-
-        await submissionOverview.navigateByUrl(stored.submissionUrl);
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(stored.namedInsured);
-        await submissionOverview.assertNamedInsured(stored.namedInsured);
-      }
-    );
-
-    test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Submission Number matches stored value`,
-
-      async ({ submissionOverview }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
-        await submissionOverview.navigateByUrl(stored.submissionUrl);
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(stored.namedInsured);
-        await submissionOverview.assertSubmissionNumber(stored.submissionNumber);
-      }
-    );
-
-    test(
-      `${Tags.REGRESSION} ${Tags.OVERVIEW} Status is still Open`,
-
-      async ({ submissionOverview }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
-        await submissionOverview.navigateByUrl(stored.submissionUrl);
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(stored.namedInsured);
-        await submissionOverview.assertDefaultStatus();
-      }
-    );
-  });
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 3 — Guest Role
-  // ══════════════════════════════════════════════════════════════════════════
-
-  test.describe('Guest Role', () => {
-
-    test.use({ role: Role.GUEST });
-
-    test(
-      `${Tags.REGRESSION} ${Tags.GUEST} New Submission button hidden for Guest`,
-
-      async ({ dashboardPage }) => {
-        await dashboardPage.navigate();
-        await dashboardPage.assertNewSubmissionButtonHidden();
-      }
-    );
-  });
-});
---------------------------------------------------------------------------------------------------
-tests/submission/policy-information.spec.ts
---------------------------------------------------------------------------------------------------
-import { test, expect }      from '../../src/fixtures/index';
-import { Tags }              from '../../src/constants/test-tags.constants';
-import { Role }              from '../../src/enums/role.enum';
-import { SubmissionFactory } from '../../src/data/factories/SubmissionFactory';
-import { SubmissionManager } from '../../src/data/managers/SubmissionManager';
-import { DateHelper }        from '../../src/helpers/DateHelper';
-
-test.use({ role: Role.UW });
-
-test.describe('Policy Information Tab — Validation', () => {
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 1 — Create submission → verify Policy tab
-  // ══════════════════════════════════════════════════════════════════════════
-
-  test.describe('Auto-population after submission creation', () => {
-
-    test.beforeEach(async ({ dashboardPage }) => {
-      await dashboardPage.navigate();
+    test.beforeEach(async ({ submissionOverview }) => {
+      await submissionOverview.navigateByUrl(submissionCtx.submissionUrl);
+      await submissionOverview.waitUntilLoaded();
+      await submissionOverview.clickPolicyInformationTab();
     });
 
+    // ── SMOKE ──────────────────────────────────────────────────────────────
+
     test(
-      `${Tags.SMOKE} ${Tags.POLICY} `
-      + 'All policy fields auto-populated from New Submission Modal data',
+      `${Tags.SMOKE} ${Tags.POLICY} All policy fields auto-populated from creation data`,
 
-      async ({
-        dashboardPage,
-        newSubmissionModal,
-        authenticatedPage,
-        submissionOverview,
-        policyInfoPage,
-      }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        await newSubmissionModal.verifyPageLoaded();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertAutoPopulatedFromSubmission(data);
+        await policyInfoPage.assertAutoPopulatedFromSubmission(submissionCtx.formData);
       }
     );
+
+    // ── SANITY — Individual field checks ───────────────────────────────────
 
     test(
       `${Tags.SANITY} ${Tags.POLICY} Submission Number matches creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, policyInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertSubmissionNumber(data.submissionNumber);
+        await policyInfoPage.assertSubmissionNumber(
+          submissionCtx.formData.submissionNumber
+        );
       }
     );
 
     test(
       `${Tags.SANITY} ${Tags.POLICY} Inception Date matches creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, policyInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertInceptionDate(data.inceptionDate);
+        await policyInfoPage.assertInceptionDate(
+          submissionCtx.formData.inceptionDate
+        );
       }
     );
 
     test(
       `${Tags.SANITY} ${Tags.POLICY} Expiration Date auto-calculated as Inception + 1 year`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, policyInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertExpirationAutoCalculated(data.inceptionDate);
+        // DateHelper calculates the expected expiration — consistent with the application
+        await policyInfoPage.assertExpirationAutoCalculated(
+          submissionCtx.formData.inceptionDate
+        );
       }
     );
 
     test(
-      `${Tags.SANITY} ${Tags.POLICY} Policy Type matches selection in modal`,
+      `${Tags.SANITY} ${Tags.POLICY} Policy Type matches creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, policyInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertPolicyType(data.policyType);
+        await policyInfoPage.assertPolicyType(submissionCtx.formData.policyType);
       }
     );
 
-    test(
-      `${Tags.REGRESSION} ${Tags.POLICY} Renewal — PY Pricing Summary button visible`,
-
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, policyInfoPage }) => {
-
-        const data   = SubmissionFactory.renewal();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
-        await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertPYPricingSummaryVisible();
-      }
-    );
+    // ── REGRESSION — Policy Number constraints ──────────────────────────────
 
     test(
-      `${Tags.REGRESSION} ${Tags.POLICY} New policy — PY Pricing Summary button hidden`,
+      `${Tags.REGRESSION} ${Tags.POLICY} Policy Number accepts 14 characters (max allowed)`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, policyInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
-        await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertPYPricingSummaryHidden();
-      }
-    );
-  });
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 2 — Stored submission → edit and validate
-  // ══════════════════════════════════════════════════════════════════════════
-
-  test.describe('Policy Number validation and editing', () => {
-
-    test.beforeEach(async ({ submissionOverview }) => {
-      const stored = SubmissionManager.getLatest();
-      if (!stored) return;
-
-      await submissionOverview.navigateByUrl(stored.submissionUrl);
-      await submissionOverview.verifyPageLoaded();
-      await submissionOverview.waitForDataLoaded(stored.namedInsured);
-      await submissionOverview.clickPolicyInformationTab();
-    });
-
-    test(
-      `${Tags.REGRESSION} ${Tags.POLICY} Policy Number accepts exactly 14 characters`,
-
-      async ({ submissionOverview, policyInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
         await policyInfoPage.assertPolicyNumberAccepts14Chars();
       }
@@ -831,210 +272,164 @@ test.describe('Policy Information Tab — Validation', () => {
     test(
       `${Tags.REGRESSION} ${Tags.POLICY} Policy Number rejects 15+ characters`,
 
-      async ({ submissionOverview, policyInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
         await policyInfoPage.assertPolicyNumberRejectsOver14Chars();
       }
     );
 
     test(
-      `${Tags.REGRESSION} ${Tags.POLICY} Can fill valid Policy Number and it saves`,
+      `${Tags.REGRESSION} ${Tags.POLICY} Can save a valid Policy Number`,
 
-      async ({ submissionOverview, policyInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
+      async ({ policyInfoPage }) => {
         await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.fillPolicyNumber('POL2026001234');
+        await policyInfoPage.fillPolicyNumber('POL2026001234'); // 13 chars — valid
         await policyInfoPage.assertPolicyNumber('POL2026001234');
       }
     );
 
-    test(
-      `${Tags.REGRESSION} ${Tags.POLICY} Submission Number on Policy tab matches stored value`,
+    // ── REGRESSION — Renewal-specific behavior ──────────────────────────────
+    // These require a Renewal submission — creates its own context separately
+    // because the outer submissionCtx is for a "New" policy type.
 
-      async ({ submissionOverview, policyInfoPage }) => {
+    test.describe('Renewal Policy — separate submission', () => {
+      let renewalCtx!: SubmissionContext;
 
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
+      test.beforeAll(async ({ browser }) => {
+        // Create a second submission with policyType = Renewal
+        const { SubmissionFactory } = await import('../../src/data/factories/SubmissionFactory');
+        const context = await browser.newContext({
+          storageState: (await import('../../src/auth/StorageStateManager')).StorageStateManager.getFilePath(Role.UW),
+          viewport: { width: 1920, height: 1080 },
+        });
+        const page = await context.newPage();
+        try {
+          const formData = SubmissionFactory.renewal();
+          const dash  = new (await import('../../src/pages/DashboardPage')).DashboardPage(page);
+          const modal = new (await import('../../src/pages/NewSubmissionModal')).NewSubmissionModal(page);
+          await dash.navigate();
+          await dash.clickNewSubmission();
+          await modal.verifyPageLoaded();
+          const newTab = await modal.createSubmission(formData, context);
+          const url    = newTab.url();
+          const { UrlHelper } = await import('../../src/helpers/UrlHelper');
+          renewalCtx = {
+            metrixSubmissionId: UrlHelper.extractMetrixSubmissionId(url),
+            displayId:          UrlHelper.extractDisplayId(url),
+            submissionUrl:      url,
+            formData,
+          };
+        } finally {
+          await context.close();
+        }
+      });
 
-        await policyInfoPage.verifyPageLoaded();
-        await policyInfoPage.assertSubmissionNumber(stored.submissionNumber);
-      }
-    );
-  });
+      test(
+        `${Tags.REGRESSION} ${Tags.POLICY} Renewal — PY Pricing Summary button is visible`,
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 3 — Guest Role
-  // ══════════════════════════════════════════════════════════════════════════
+        async ({ submissionOverview, policyInfoPage }) => {
+          await submissionOverview.navigateByUrl(renewalCtx.submissionUrl);
+          await submissionOverview.waitUntilLoaded();
+          await submissionOverview.clickPolicyInformationTab();
+          await policyInfoPage.verifyPageLoaded();
+          await policyInfoPage.assertPYPricingSummaryVisible();
+        }
+      );
 
-  test.describe('Guest Role', () => {
+      test(
+        `${Tags.REGRESSION} ${Tags.POLICY} New policy — PY Pricing Summary button is hidden`,
 
-    test.use({ role: Role.GUEST });
-
-    test(
-      `${Tags.REGRESSION} ${Tags.GUEST} Policy Number disabled for Guest`,
-
-      async ({ submissionOverview, policyInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
-        await submissionOverview.navigateByUrl(stored.submissionUrl);
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(stored.namedInsured);
-        await submissionOverview.clickPolicyInformationTab();
-
-        await policyInfoPage.verifyPageLoaded();
-        await expect(policyInfoPage['policyNumberInput']).toBeDisabled();
-      }
-    );
-  });
-});
-------------------------------------
-tests/submission/broker-information.spec.ts
-------------------------------------
-import { test, expect }      from '../../src/fixtures/index';
-import { Tags }              from '../../src/constants/test-tags.constants';
-import { Role }              from '../../src/enums/role.enum';
-import { SubmissionFactory } from '../../src/data/factories/SubmissionFactory';
-import { SubmissionManager } from '../../src/data/managers/SubmissionManager';
-
-test.use({ role: Role.UW });
-
-test.describe('Broker Information Tab — Validation', () => {
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 1 — Create submission → verify Broker tab
-  // ══════════════════════════════════════════════════════════════════════════
-
-  test.describe('Auto-population after submission creation', () => {
-
-    test.beforeEach(async ({ dashboardPage }) => {
-      await dashboardPage.navigate();
+        async ({ policyInfoPage }) => {
+          // Uses the outer submissionCtx (New policy type)
+          await policyInfoPage.verifyPageLoaded();
+          await policyInfoPage.assertPYPricingSummaryHidden();
+        }
+      );
     });
 
+    // ── Guest Role ──────────────────────────────────────────────────────────
+
+    test.describe('Guest Role', () => {
+      test.use({ role: Role.GUEST });
+
+      test(
+        `${Tags.REGRESSION} ${Tags.GUEST} Policy Number is disabled for Guest`,
+
+        async ({ policyInfoPage }) => {
+          await policyInfoPage.verifyPageLoaded();
+          await expect(
+            policyInfoPage['policyNumberInput'],
+            'Policy Number should be disabled for Guest role'
+          ).toBeDisabled();
+        }
+      );
+    });
+  });
+
+  // ════════════════════════════════════════════════════════════════════════
+  // TAB 3 — BROKER INFORMATION
+  // ════════════════════════════════════════════════════════════════════════
+
+  test.describe('Broker Information tab', () => {
+
+    test.beforeEach(async ({ submissionOverview }) => {
+      await submissionOverview.navigateByUrl(submissionCtx.submissionUrl);
+      await submissionOverview.waitUntilLoaded();
+      await submissionOverview.clickBrokerInformationTab();
+    });
+
+    // ── SMOKE ──────────────────────────────────────────────────────────────
+
     test(
-      `${Tags.SMOKE} ${Tags.BROKER} `
-      + 'All broker fields auto-populated from New Submission Modal data',
+      `${Tags.SMOKE} ${Tags.BROKER} All broker fields auto-populated from creation data`,
 
-      async ({
-        dashboardPage,
-        newSubmissionModal,
-        authenticatedPage,
-        submissionOverview,
-        brokerInfoPage,
-      }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        await newSubmissionModal.verifyPageLoaded();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickBrokerInformationTab();
-
+      async ({ brokerInfoPage }) => {
         await brokerInfoPage.verifyPageLoaded();
-        await brokerInfoPage.assertAutoPopulatedFromSubmission(data);
+        await brokerInfoPage.assertAutoPopulatedFromSubmission(submissionCtx.formData);
       }
     );
 
+    // ── SANITY — Individual field checks ───────────────────────────────────
+
     test(
-      `${Tags.SANITY} ${Tags.BROKER} Broker Company matches modal entry`,
+      `${Tags.SANITY} ${Tags.BROKER} Broker Company matches creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, brokerInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickBrokerInformationTab();
-
+      async ({ brokerInfoPage }) => {
         await brokerInfoPage.verifyPageLoaded();
-        await brokerInfoPage.assertBrokerCompany(data.broker.brokerCompany);
+        await brokerInfoPage.assertBrokerCompany(
+          submissionCtx.formData.broker.brokerCompany
+        );
       }
     );
 
     test(
       `${Tags.SANITY} ${Tags.BROKER} Broker Country defaults to USA`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, brokerInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickBrokerInformationTab();
-
+      async ({ brokerInfoPage }) => {
         await brokerInfoPage.verifyPageLoaded();
-        // DropdownComponent.getSelectedValue() used internally
+        // assertDefaultCountry uses DropdownComponent.getSelectedValue() internally
         await brokerInfoPage.assertDefaultCountry();
       }
     );
 
     test(
-      `${Tags.SANITY} ${Tags.BROKER} Broker address fields match modal entries`,
+      `${Tags.SANITY} ${Tags.BROKER} Broker address fields match creation data`,
 
-      async ({ dashboardPage, newSubmissionModal, authenticatedPage, submissionOverview, brokerInfoPage }) => {
-
-        const data   = SubmissionFactory.default();
-        await dashboardPage.clickNewSubmission();
-        const newTab = await newSubmissionModal.createSubmission(data, authenticatedPage.context());
-
-        await submissionOverview.navigateByUrl(newTab.url());
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(data.insured.namedInsured);
-        await submissionOverview.clickBrokerInformationTab();
-
+      async ({ brokerInfoPage }) => {
         await brokerInfoPage.verifyPageLoaded();
-        await brokerInfoPage.assertStreetAddress(data.broker.streetAddress);
-        await brokerInfoPage.assertCity(data.broker.city);
-        await brokerInfoPage.assertState(data.broker.state);
-        await brokerInfoPage.assertZip(data.broker.zip);
+        await brokerInfoPage.assertStreetAddress(submissionCtx.formData.broker.streetAddress);
+        await brokerInfoPage.assertCity(submissionCtx.formData.broker.city);
+        await brokerInfoPage.assertState(submissionCtx.formData.broker.state);
+        await brokerInfoPage.assertZip(submissionCtx.formData.broker.zip);
       }
     );
-  });
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 2 — Stored submission → email, commission, counter tests
-  // Use beforeEach to navigate once — all tests in this block share it
-  // ══════════════════════════════════════════════════════════════════════════
-
-  test.describe('Email, Commission and Counter tests on stored submission', () => {
-
-    test.beforeEach(async ({ submissionOverview }) => {
-      const stored = SubmissionManager.getLatest();
-      if (!stored) return;
-
-      await submissionOverview.navigateByUrl(stored.submissionUrl);
-      await submissionOverview.verifyPageLoaded();
-      await submissionOverview.waitForDataLoaded(stored.namedInsured);
-      await submissionOverview.clickBrokerInformationTab();
-    });
-
-    // ── Email ───────────────────────────────────────────────────────────────
+    // ── REGRESSION — Email validation ───────────────────────────────────────
 
     test(
       `${Tags.REGRESSION} ${Tags.BROKER} Valid email — no error shown`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.fillEmail('valid@company.com');
         await brokerInfoPage.assertNoEmailValidationError();
@@ -1042,29 +437,11 @@ test.describe('Broker Information Tab — Validation', () => {
     );
 
     test(
-      `${Tags.REGRESSION} ${Tags.BROKER} Email without @ — shows error`,
+      `${Tags.REGRESSION} ${Tags.BROKER} Invalid email (no @) — error shown`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.fillEmail('invalidemail.com');
-        await brokerInfoPage.assertEmailValidationError();
-      }
-    );
-
-    test(
-      `${Tags.REGRESSION} ${Tags.BROKER} Plain text email — shows error`,
-
-      async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
-        await brokerInfoPage.verifyPageLoaded();
-        await brokerInfoPage.fillEmail('notanemail');
         await brokerInfoPage.assertEmailValidationError();
       }
     );
@@ -1073,10 +450,6 @@ test.describe('Broker Information Tab — Validation', () => {
       `${Tags.REGRESSION} ${Tags.BROKER} Fixing invalid email clears the error`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.fillEmail('bademail');
         await brokerInfoPage.assertEmailValidationError();
@@ -1085,16 +458,12 @@ test.describe('Broker Information Tab — Validation', () => {
       }
     );
 
-    // ── Commission ──────────────────────────────────────────────────────────
+    // ── REGRESSION — Commission validation ─────────────────────────────────
 
     test(
       `${Tags.REGRESSION} ${Tags.BROKER} Commission = 100 is valid`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.fillCommission(100);
         await brokerInfoPage.assertNoCommissionValidationError();
@@ -1103,43 +472,31 @@ test.describe('Broker Information Tab — Validation', () => {
     );
 
     test(
-      `${Tags.REGRESSION} ${Tags.BROKER} Commission = 0 is valid`,
-
-      async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
-        await brokerInfoPage.verifyPageLoaded();
-        await brokerInfoPage.fillCommission(0);
-        await brokerInfoPage.assertNoCommissionValidationError();
-      }
-    );
-
-    test(
       `${Tags.REGRESSION} ${Tags.BROKER} Commission = 101 shows error`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.fillCommission(101);
         await brokerInfoPage.assertCommissionValidationError();
       }
     );
 
-    // ── Character Counter ───────────────────────────────────────────────────
+    test(
+      `${Tags.REGRESSION} ${Tags.BROKER} Commission = 0 is valid`,
+
+      async ({ brokerInfoPage }) => {
+        await brokerInfoPage.verifyPageLoaded();
+        await brokerInfoPage.fillCommission(0);
+        await brokerInfoPage.assertNoCommissionValidationError();
+      }
+    );
+
+    // ── REGRESSION — Character counter (2000 → 0) ──────────────────────────
 
     test(
       `${Tags.REGRESSION} ${Tags.BROKER} Counter starts at 2000 when field is empty`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.clearBrokerNotes();
         await brokerInfoPage.assertCounterAtMaximum();
@@ -1150,10 +507,6 @@ test.describe('Broker Information Tab — Validation', () => {
       `${Tags.REGRESSION} ${Tags.BROKER} Typing 50 chars → counter shows 1950`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.clearBrokerNotes();
         await brokerInfoPage.fillBrokerNotes('A'.repeat(50));
@@ -1162,13 +515,9 @@ test.describe('Broker Information Tab — Validation', () => {
     );
 
     test(
-      `${Tags.REGRESSION} ${Tags.BROKER} Counter reaches 0 at 2000 chars`,
+      `${Tags.REGRESSION} ${Tags.BROKER} Counter reaches 0 at 2000 characters`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
         await brokerInfoPage.clearBrokerNotes();
         await brokerInfoPage.fillBrokerNotes('C'.repeat(2000));
@@ -1180,45 +529,28 @@ test.describe('Broker Information Tab — Validation', () => {
       `${Tags.REGRESSION} ${Tags.BROKER} Counter resets to 2000 after clearing`,
 
       async ({ brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
         await brokerInfoPage.verifyPageLoaded();
-        await brokerInfoPage.fillBrokerNotes('Some text here');
+        await brokerInfoPage.fillBrokerNotes('Some notes');
         await brokerInfoPage.clearBrokerNotes();
         await brokerInfoPage.assertCounterAtMaximum();
       }
     );
-  });
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // GROUP 3 — Guest Role
-  // ══════════════════════════════════════════════════════════════════════════
+    // ── Guest Role ──────────────────────────────────────────────────────────
 
-  test.describe('Guest Role', () => {
+    test.describe('Guest Role', () => {
+      test.use({ role: Role.GUEST });
 
-    test.use({ role: Role.GUEST });
+      test(
+        `${Tags.REGRESSION} ${Tags.GUEST} Broker fields are disabled for Guest`,
 
-    test(
-      `${Tags.REGRESSION} ${Tags.GUEST} Broker fields disabled for Guest`,
-
-      async ({ submissionOverview, brokerInfoPage }) => {
-
-        const stored = SubmissionManager.getLatest();
-        if (!stored) { test.skip(true, 'No stored submission.'); return; }
-
-        await submissionOverview.navigateByUrl(stored.submissionUrl);
-        await submissionOverview.verifyPageLoaded();
-        await submissionOverview.waitForDataLoaded(stored.namedInsured);
-        await submissionOverview.clickBrokerInformationTab();
-
-        await brokerInfoPage.verifyPageLoaded();
-        await expect(brokerInfoPage['brokerCompanyInput']).toBeDisabled();
-        await expect(brokerInfoPage['emailInput']).toBeDisabled();
-        await expect(brokerInfoPage['commissionInput']).toBeDisabled();
-      }
-    );
+        async ({ brokerInfoPage }) => {
+          await brokerInfoPage.verifyPageLoaded();
+          await expect(brokerInfoPage['brokerCompanyInput']).toBeDisabled();
+          await expect(brokerInfoPage['emailInput']).toBeDisabled();
+          await expect(brokerInfoPage['commissionInput']).toBeDisabled();
+        }
+      );
+    });
   });
 });
-  
